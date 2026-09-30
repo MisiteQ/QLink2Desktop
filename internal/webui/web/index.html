@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="QLink2Desktop —— 把本机端口、Docker 容器与远端服务一键放到飞牛桌面">
+  <meta name="qlink-version" content="__V__">
+  <title>QLink2Desktop</title>
+
+  <!--
+    主题预应用 —— 必须在样式表之前、且同步执行。
+
+    为什么单独占一段脚本、而不是并进下面那段自诊断脚本：
+      1. 它要在 <link rel=stylesheet> 之前跑完，否则浏览器会先按默认的浅色
+         画一帧，再被 JS 改成深色 —— 深色用户每次打开都闪一下白（FOUC）；
+      2. 它绝不能因为别的代码出错而失效，所以自己包在 try/catch 里，
+         并且放在最前面（真出了异常也不会连累后面的基准守卫与看门狗）。
+
+    data-theme 上写的是**解析后**的 light / dark，不是 auto：CSS 只需要认两种
+    底板，"跟随系统"这一步必须在这里用 matchMedia 就地算掉。
+    键名与 assets/modules/theme.js 的 STORAGE_KEY 必须一致（e2e 有静态守卫）。
+  -->
+  <script>
+    (function () {
+      var KEY = 'qlink2d.theme';
+      var ACCENTS = ['blue', 'teal', 'green', 'violet', 'orange', 'rose'];
+      var mode = 'auto';
+      var accent = 'blue';
+      try {
+        var saved = JSON.parse(localStorage.getItem(KEY) || '{}') || {};
+        if (saved.mode === 'light' || saved.mode === 'dark' || saved.mode === 'auto') mode = saved.mode;
+        if (ACCENTS.indexOf(saved.accent) !== -1) accent = saved.accent;
+      } catch (e) {
+        /* 读不到就走默认值 —— 主题是锦上添花，不能因为它挡住启动 */
+      }
+      var dark = mode === 'dark';
+      if (mode === 'auto') {
+        try { dark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches); }
+        catch (e) { dark = false; }
+      }
+      var root = document.documentElement;
+      root.setAttribute('data-theme', dark ? 'dark' : 'light');
+      root.setAttribute('data-accent', accent);
+      var meta = document.querySelector('meta[name="color-scheme"]');
+      if (meta) meta.setAttribute('content', dark ? 'dark light' : 'light dark');
+    })();
+  </script>
+
+  <script>
+    // ---- 启动期自诊断 ------------------------------------------------------
+    //
+    // 这段脚本必须满足三个约束，缺一不可：
+    //   1. 同步内联，不能写成 type="module" —— 模块脚本是延迟执行的，
+    //      等它跑起来时相对资源早已按错误的基准发出去了；
+    //   2. 位于所有 <link> / <script src> 之前；
+    //   3. 不依赖任何外部文件 —— 它要处理的故障恰恰是「外部文件加载不到」。
+    //
+    // 它负责三件事：
+    //
+    // A. 相对路径基准修正（尾斜杠被网关吃掉）
+    //    飞牛统一网关会吃掉 app/ui/config 里 url 的尾斜杠，iframe 拿到的
+    //    文档 URL 是 /app/qlink2desktop（无斜杠）。此时浏览器把相对路径的
+    //    基准目录当成 /app/，于是 assets/app.js 被解析成 /app/assets/app.js
+    //    —— 它不匹配网关前缀，直接 404，页面永久停在「正在加载界面…」。
+    //    为什么不能只在后端做 302：网关是否把 /app/<name> 前缀转发给后端，
+    //    各飞牛版本行为不一致；在「剥掉前缀」的版本里后端只看到 "/"，
+    //    根本不知道对外前缀是什么。只有浏览器自己知道它请求的是哪个 URL。
+    //    判据：本 SPA 全部使用 hash 路由（#desktop / #discovery …），
+    //    路径段恒定，故「不以斜杠结尾且末段不含点」就一定是应用根目录。
+    //    手段：同步注入 <base>（详见下方 A 段注释）。
+    //
+    // B. 采集加载失败的外部资源
+    //    资源加载失败不冒泡，只有在捕获阶段才能听到，所以第三个参数是 true。
+    //
+    // C. 看门狗
+    //    超时仍未进入应用，就把版本号、文档 URL、失败资源清单直接摆到页面上。
+    //    为什么必须在这里兜底：app.js 本身就是被加载的目标之一，它加载失败时，
+    //    写在它里面的错误界面永远不会执行 —— 用户能看到的只有一只永远转的圈，
+    //    「打不开」这三个字背后没有任何可排查的信息。
+    (function () {
+      var diag = { failed: [], reported: false, entryFailed: false };
+      window.__qlinkDiag = diag;
+
+      // A. 相对路径基准修正（尾斜杠被网关吃掉时）
+      //
+      //    做法是**同步注入 <base>**，而不是 location.replace(...)：
+      //    replace 是异步的，本函数返回后解析器会继续把后面那批相对资源
+      //    按旧基准发出去 —— 结果是控制台先炸出一片 404，等重定向回来才恢复。
+      //    那串红字极具误导性（看起来就像应用坏了），真机截图里正是这个形态。
+      //    <base> 在本行立即生效，后面的资源第一次就解析到正确地址：
+      //    省掉一次整页加载，控制台也干净。
+      //    兜底：万一取不到 <head>，退回重定向。
+      var p = window.location.pathname;
+      var last = p.substring(p.lastIndexOf('/') + 1);
+      if (p !== '/' && p.charAt(p.length - 1) !== '/' && last.indexOf('.') === -1) {
+        if (document.head) {
+          var base = document.createElement('base');
+          base.href = p + '/';
+          document.head.appendChild(base);
+        } else {
+          window.location.replace(p + '/' + window.location.search + window.location.hash);
+          return;
+        }
+      }
+
+      // B. 资源加载失败（捕获阶段）
+      //    资源加载失败不冒泡，只有在捕获阶段才能听到，所以第三个参数是 true。
+      window.addEventListener('error', function (e) {
+        var t = e && e.target;
+        if (!t || !(t.src || t.href)) return;
+        var url = String(t.src || t.href);
+        // 入口模块自己的 error 事件有两种成因：它自己没取到，或它 import 的
+        // 子模块没取到。两种情况要给出不同的说明，所以单独标记。
+        if (t.tagName === 'SCRIPT' && url.indexOf('assets/app.js') !== -1) {
+          diag.entryFailed = true;
+          return;
+        }
+        diag.failed.push(url);
+      }, true);
+
+      // C. 看门狗
+      var GRACE_MS = 12000; // 首次启动要做图标扫描，窗口给宽一点；误报会自行消失
+      var deadline = Date.now() + GRACE_MS;
+
+      function version() {
+        var m = document.querySelector('meta[name="qlink-version"]');
+        return (m && m.getAttribute('content')) || '';
+      }
+
+      function tick() {
+        var app = document.getElementById('app');
+        var boot = document.getElementById('boot');
+        if (!boot || boot.hidden) return;              // 已进入应用（boot 被隐藏）
+        if (app && !app.hidden) return;                // 双保险
+        if (Date.now() < deadline) { setTimeout(tick, 500); return; }
+        report();
+      }
+
+      // probe 手动走一遍入口模块的 import 图，找出取不到的 URL。
+      //
+      // 为什么非得自己做：模块图里任何一个子模块 404，浏览器只会在控制台
+      // 丢一句没有文件名的报错，页面上则永远转圈 —— 而此刻真正需要的正是
+      // "哪个文件 404 了"。本项目 import 层级浅，两层足够覆盖。
+      function probe(url, depth, found, seen) {
+        if (depth > 2 || seen[url]) return;
+        seen[url] = 1;
+        fetch(url, { cache: 'no-store' })
+          .then(function (res) {
+            if (!res.ok) { found.push('HTTP ' + res.status + '  ' + url); return null; }
+            return res.text();
+          })
+          .then(function (text) {
+            if (!text) return;
+            // 只匹配静态 import / export ... from，且只跟进相对路径。
+            var re = /(?:^|[\s;}])(?:import|export)[^'"\n]*?['"]([^'"]+)['"]/g;
+            var m;
+            while ((m = re.exec(text))) {
+              var spec = m[1];
+              if (spec.charAt(0) !== '.') continue;
+              probe(new URL(spec, url).href, depth + 1, found, seen);
+            }
+          })
+          .catch(function () { found.push('请求失败  ' + url); });
+      }
+
+      function report() {
+        var detail = document.getElementById('boot-detail');
+        // app.js 活着的话会给出一句更具体的说明（接口名 / 状态码），
+        // 那种信息比这里的环境快照有用得多，不要覆盖。
+        if (!detail || detail.textContent || diag.reported) return;
+        diag.reported = true;
+
+        var lines = [];
+        lines.push('版本 v' + (version() || '未知') + ' · 超过 ' + Math.round(GRACE_MS / 1000) + ' 秒仍未就绪');
+        lines.push('文档：' + window.location.pathname);
+        if (diag.entryFailed) {
+          lines.push('入口模块 assets/app.js 没能执行：它自己或它 import 的子模块没有取到。');
+          lines.push('最常见成因是浏览器复用了旧版本的缓存文件。');
+          lines.push('处理：按 Ctrl+Shift+R 强制刷新；仍不行就卸载后重装本版。');
+        } else if (!diag.failed.length) {
+          lines.push('没有捕获到资源加载失败 —— 更可能是接口无响应或整个脚本没被执行。');
+        }
+        if (diag.failed.length) {
+          lines.push('其他加载失败 ' + diag.failed.length + ' 项：');
+          for (var i = 0; i < diag.failed.length && i < 8; i++) lines.push('  ' + diag.failed[i]);
+          if (diag.failed.length > 8) lines.push('  …另有 ' + (diag.failed.length - 8) + ' 项');
+        }
+        detail.textContent = lines.join('\n');
+        detail.hidden = false;
+
+        var spinner = document.querySelector('.boot-spinner');
+        if (spinner) spinner.hidden = true;
+        var retry = document.getElementById('boot-retry');
+        if (retry) retry.hidden = false;
+
+        // 追加 import 图自检结果（异步，稍等片刻再回填）。
+        var found = [];
+        probe(new URL('assets/app.js', document.baseURI).href, 0, found, {});
+        window.setTimeout(function () {
+          if (!found.length) return;
+          detail.textContent += '\n\n取不到的文件：\n  ' + found.join('\n  ');
+        }, 2000);
+      }
+
+      setTimeout(tick, 500);
+    })();
+  </script>
+
+  <!--
+    资源 URL 上的 ?v=__V__ 由后端 handleSPA 在返回时替换成真实版本号。
+    为什么需要：style.css / app.js 的文件名不带哈希，若浏览器在某个旧版本
+    时用强缓存（max-age）存下过它们，升级后会继续用旧 JS 而不回源，
+    表现是"新版本装了却没生效"。带上版本号就等于换了 URL，缓存必然失效。
+    此外这些资源统一带 no-store，从响应头这一层再堵一道。
+  -->
+  <link rel="stylesheet" href="assets/style.css?v=__V__">
+  <link rel="icon" href="icons/default-64.png?v=__V__" type="image/png">
+</head>
+<body>
+  <div id="boot" class="boot">
+    <div class="boot-card">
+      <div class="boot-spinner" aria-hidden="true"></div>
+      <h1>QLink2Desktop</h1>
+      <p id="boot-message">正在加载界面…</p>
+      <!-- 版本号常显：任何一张截图都能直接说明「装的是哪一版」，
+           省掉反复确认包名的来回。占位符由后端替换成真实版本号。 -->
+      <p id="boot-version" class="boot-version">v__V__</p>
+      <!-- 启动失败时展示具体原因与重试入口。
+           没有这块的话，任何失败都只能被用户描述成"卡住了"，
+           既拿不到状态码也拿不到接口名，排查只能靠猜。
+           内容由 app.js（接口层失败）或上面的看门狗（资源层失败）写入。 -->
+      <p id="boot-detail" class="boot-detail" hidden></p>
+      <button id="boot-retry" class="btn primary" type="button" hidden>重试</button>
+    </div>
+  </div>
+
+  <div id="app" class="app" hidden>
+    <aside class="sidebar">
+      <div class="brand">
+        <img class="brand-logo" src="icons/default-64.png?v=__V__" alt="" width="28" height="28">
+        <div class="brand-text">
+          <strong>QLink2Desktop</strong>
+          <span id="brand-version"></span>
+        </div>
+      </div>
+
+      <nav class="nav" id="nav" aria-label="主导航"></nav>
+
+      <div class="sidebar-foot">
+        <div class="pip" id="pip-cli" title="飞牛应用中心命令行状态">
+          <span class="dot"></span><span class="pip-text">检测中…</span>
+        </div>
+        <div class="pip" id="pip-live" title="实时事件流状态">
+          <span class="dot"></span><span class="pip-text">连接中…</span>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-title">
+          <h1 id="page-title">桌面应用</h1>
+          <p id="page-subtitle"></p>
+        </div>
+        <div class="topbar-actions" id="topbar-actions"></div>
+      </header>
+
+      <div class="content" id="content" tabindex="-1"></div>
+    </main>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
+  <div id="modal-root"></div>
+
+  <script type="module" src="assets/app.js?v=__V__"></script>
+</body>
+</html>

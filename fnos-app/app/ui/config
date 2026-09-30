@@ -1,0 +1,15 @@
+{
+    ".url": {
+        "qlink2desktop.main": {
+            "title": "QLink2Desktop",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "protocol": "",
+            "gatewayPrefix": "/app/qlink2desktop",
+            "gatewaySocket": "app.sock",
+            "url": "/app/qlink2desktop/",
+            "allUsers": false,
+            "noDisplay": false
+        }
+    }
+}

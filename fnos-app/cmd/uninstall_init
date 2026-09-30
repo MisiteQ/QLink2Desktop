@@ -1,0 +1,83 @@
+#!/bin/bash
+# 卸载前钩子：决定本应用生成的桌面图标的去留。
+#
+# 官方建议把「用户数据的去留」交给 wizard/uninstall 收集，
+# 这里据此执行。向导字段 wizard_keep_icons 的取值：
+#   remove（默认）→ 一并卸载 qlink2d.* 命名空间下本项目创建的桌面图标
+#   keep          → 保留，用户可自行在应用中心处理
+#
+# 安全约束：只清理本应用自己的 qlink2d. 前缀。
+# 其它工具各有自己的命名空间，与本应用没有任何关系——早期版本曾把它们
+# 列为"遗留前缀"一并清理，真实地误删过用户用其它工具生成的图标，
+# 这是本文件历史上最严重的一次越权，绝不允许复发。
+# 每一步都容忍失败（|| true）：卸载主应用的成功不该被清理动作绑架。
+
+set -u
+
+MANAGED_PREFIXES="qlink2d."
+
+# 覆盖升级保护：upgrade_init 会在升级前写 /tmp/qlink2desktop-upgrading
+# 时间戳标记。部分飞牛版本在覆盖安装流程里同样会触发本卸载钩子——
+# 若正处于升级窗口（10 分钟内），绝不能清理桌面图标，否则升级完成后
+# 桌面上剩下的全是「已被卸载」的僵尸图标（真机上踩过的坑）。
+UPGRADE_FLAG="/tmp/qlink2desktop-upgrading"
+if [ -f "${UPGRADE_FLAG}" ]; then
+    flag_time="$(cat "${UPGRADE_FLAG}" 2>/dev/null || echo 0)"
+    now_time="$(date +%s)"
+    diff_time=$((now_time - flag_time))
+    if [ "${diff_time}" -ge 0 ] && [ "${diff_time}" -le 600 ]; then
+        echo "处于覆盖升级窗口（${diff_time} 秒前开始），保留桌面图标，跳过清理。"
+        exit 0
+    fi
+fi
+rm -f "${UPGRADE_FLAG}" 2>/dev/null || true
+
+keep_requested() {
+    echo "${wizard_keep_icons:-remove}" | grep -qi '^keep$'
+}
+
+if keep_requested; then
+    # 用户选择保留：什么都不做。
+    exit 0
+fi
+
+# appcenter-cli 的常见位置；找不到就静默退出，
+# 此时图标会留下来，用户可在应用中心手动卸载。
+CLI=""
+for c in \
+    "${TRIM_APPDEST}/../../appcenter/target/bin/appcenter-cli" \
+    /var/apps/appcenter/target/bin/appcenter-cli \
+    /usr/bin/appcenter-cli \
+    /usr/local/bin/appcenter-cli; do
+    if [ -x "${c}" ]; then
+        CLI="${c}"
+        break
+    fi
+done
+[ -z "${CLI}" ] && CLI="$(command -v appcenter-cli 2>/dev/null || true)"
+if [ -z "${CLI}" ]; then
+    exit 0
+fi
+
+# 用户在 wizard/uninstall 里选择「保留」时直接退出。
+# 用 grep 而不是精确等值比较：向导值是字符串，且要容忍前后空白。
+if echo "${wizard_keep_icons:-}" | grep -qi '^keep$'; then
+    exit 0
+fi
+
+LIST_OUT="$("${CLI}" list 2>/dev/null || true)"
+
+for prefix in ${MANAGED_PREFIXES}; do
+    # 逐行取第一列（应用名），再按前缀过滤。
+    echo "${LIST_OUT}" | while IFS= read -r line; do
+        line="$(echo "${line}" | tr -d '│|┃' | awk '{print $1}')"
+        case "${line}" in
+            "${prefix}"*) ;;
+            *) continue ;;
+        esac
+        "${CLI}" stop "${line}" >/dev/null 2>&1 || true
+        "${CLI}" uninstall "${line}" >/dev/null 2>&1 || true
+    done
+done
+
+exit 0

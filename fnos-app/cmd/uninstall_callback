@@ -1,0 +1,13 @@
+#!/bin/bash
+# 卸载后钩子：清理本应用自身的运行时痕迹。
+#
+# 注意：不要在这里删除 TRIM_PKGVAR —— 用户数据（配置、图标、日志）
+# 是否保留由飞牛应用中心的卸载策略决定，脚本层面越权删除
+# 是"卸载后数据全没了"这类投诉最常见的根源。
+set -u
+
+rm -f "${TRIM_APPDEST:-}/app.sock" 2>/dev/null || true
+rm -f "/tmp/qlink2desktop.sock" 2>/dev/null || true
+rm -f "/tmp/qlink2desktop.app.sock" 2>/dev/null || true
+
+exit 0

@@ -1,0 +1,31 @@
+[
+    {
+        "stepTitle": "桌面图标",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "QLink2Desktop 会在飞牛桌面上生成若干应用图标（本机端口、容器、代理、快捷方式）。卸载时可以选择它们的去留。"
+            },
+            {
+                "type": "radio",
+                "field": "wizard_keep_icons",
+                "label": "已生成的桌面图标",
+                "initValue": "remove",
+                "options": [
+                    {
+                        "label": "一并移除（推荐）",
+                        "value": "remove"
+                    },
+                    {
+                        "label": "保留，不删除",
+                        "value": "keep"
+                    }
+                ]
+            },
+            {
+                "type": "tips",
+                "helpText": "选择保留时，这些图标将不再被维护，其中经 CGI 跳转的入口会失效，需要自行在应用中心卸载。"
+            }
+        ]
+    }
+]

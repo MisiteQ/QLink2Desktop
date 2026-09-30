@@ -1,0 +1,6 @@
+#!/bin/bash
+# 配置变更前钩子。
+#
+# 当前没有需要随配置变更落盘的文件：本应用的全部设置
+# 都由前端写入 TRIM_PKGVAR/data/settings.json 并即时生效。
+exit 0

@@ -1,0 +1,189 @@
+#!/bin/bash
+# QLink2Desktop 生命周期主控脚本（start / stop / status）。
+#
+# 结构遵循 developer.fnnas.com 的官方示例：PID 文件 + 退出码约定
+#   start  成功 0 / 失败 1
+#   stop   成功 0 / 失败 1
+#   status 运行中 0 / 未运行 3
+#
+# 与官方示例相比多做了两件事：
+#   1) 启动后等待统一网关的 Unix 套接字就绪（最多 8 秒），
+#      否则应用中心会先于服务把图标点亮，用户点开就是 502；
+#   2) 二进制定位带兜底搜索 —— 不同版本 / 不同存储卷下
+#      TRIM_APPDEST 的布局不完全一致。
+
+TRIM_PKGVAR="${TRIM_PKGVAR:-/var/apps/qlink2desktop/var}"
+TRIM_APPDEST="${TRIM_APPDEST:-/var/apps/qlink2desktop/target}"
+
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+
+APP_NAME="qlink2desktop"
+BIN_NAME="${APP_NAME}"
+SOCK_PATH="${TRIM_APPDEST}/app.sock"
+
+log_msg() {
+    mkdir -p "${TRIM_PKGVAR}" 2>/dev/null || true
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [main] $1" >> "${LOG_FILE}" 2>/dev/null || true
+}
+
+# write_user_error 把用户可见的错误写进官方约定的临时日志文件。
+write_user_error() {
+    if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
+        echo "$1" > "${TRIM_TEMP_LOGFILE}" 2>/dev/null || true
+    fi
+    echo "$1" >&2
+}
+
+check_process() {
+    local pid="$1"
+    kill -0 "${pid}" 2>/dev/null
+}
+
+resolve_binary() {
+    # 注意：源码包里 app/ 的内容安装后就是 TRIM_APPDEST 的根，
+    # 因此 app/qlink2desktop → ${TRIM_APPDEST}/qlink2desktop。
+    for candidate in \
+        "${TRIM_APPDEST}/${BIN_NAME}" \
+        "${TRIM_APPDEST}/server/${BIN_NAME}" \
+        "${TRIM_APPDEST}/app/${BIN_NAME}"; do
+        if [ -x "${candidate}" ]; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+    # 以上都没有时全盘搜一次，作为最后兜底。
+    find "${TRIM_APPDEST}" -type f -name "${BIN_NAME}" 2>/dev/null | head -n 1
+}
+
+status() {
+    if [ -f "${PID_FILE}" ]; then
+        pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+        if check_process "${pid}"; then
+            return 0
+        fi
+        # 进程已不在但 PID 文件还在，清掉避免误报。
+        rm -f "${PID_FILE}"
+    fi
+    return 1
+}
+
+start_process() {
+    if status; then
+        return 0
+    fi
+
+    log_msg "Starting ${APP_NAME}..."
+    mkdir -p "${TRIM_PKGVAR}/data" 2>/dev/null || true
+    mkdir -p "${TRIM_PKGVAR}/logs" 2>/dev/null || true
+
+    CMD="$(resolve_binary)"
+    if [ -z "${CMD}" ] || [ ! -f "${CMD}" ]; then
+        log_msg "ERROR: executable ${BIN_NAME} not found under ${TRIM_APPDEST}"
+        write_user_error "未找到 ${APP_NAME} 的可执行文件，请尝试重新安装。"
+        return 1
+    fi
+    chmod +x "${CMD}" 2>/dev/null || true
+
+    # 飞牛统一网关接入：服务把 HTTP 监听在 ${TRIM_APPDEST}/app.sock 上，
+    # 网关把 /app/qlink2desktop 的请求转发过来，因此默认不再占用任何 TCP 端口。
+    # 需要局域网直连调试时，可在应用环境里设置 PORT 环境变量。
+    PORT_ARGS=""
+    if [ -n "${PORT:-}" ]; then
+        PORT_ARGS="-port ${PORT}"
+    fi
+
+    # 启动后台对账与守护，端口段避开常用服务端口。
+    "${CMD}" \
+        -data "${TRIM_PKGVAR}/data" \
+        -log-dir "${TRIM_PKGVAR}/logs" \
+        -socket "${SOCK_PATH}" \
+        -proxy-port-base 18000 \
+        ${PORT_ARGS} >> "${LOG_FILE}" 2>&1 &
+
+    local pid=$!
+    printf "%s" "${pid}" > "${PID_FILE}"
+    log_msg "Started ${APP_NAME} with PID ${pid}"
+
+    # 等待进程存活且套接字就绪（40 x 0.2s = 8s）。
+    local waited=0
+    while [ "${waited}" -lt 40 ]; do
+        if ! check_process "${pid}"; then
+            log_msg "ERROR: process ${pid} exited right after startup"
+            if [ -f "${LOG_FILE}" ]; then
+                tail -n 30 "${LOG_FILE}" >> "${LOG_FILE}" 2>/dev/null || true
+            fi
+            write_user_error "${APP_NAME} 启动后立即退出，请查看 ${LOG_FILE}。"
+            rm -f "${PID_FILE}"
+            return 1
+        fi
+        if [ -S "${SOCK_PATH}" ]; then
+            break
+        fi
+        sleep 0.2
+        waited=$((waited + 1))
+    done
+
+    if [ -S "${SOCK_PATH}" ]; then
+        log_msg "Unix socket ${SOCK_PATH} is ready (waited $((waited * 200))ms)."
+    else
+        log_msg "WARN: socket ${SOCK_PATH} not ready after 8s; gateway may return 502 until it is."
+    fi
+
+    log_msg "${APP_NAME} is running."
+    return 0
+}
+
+stop_process() {
+    log_msg "Stopping ${APP_NAME}..."
+
+    if [ -r "${PID_FILE}" ]; then
+        pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+        if ! check_process "${pid}"; then
+            rm -f "${PID_FILE}"
+            log_msg "Process ${pid} was not running, cleaned PID file."
+            return 0
+        fi
+
+        kill -TERM "${pid}" >> "${LOG_FILE}" 2>&1 || true
+
+        local count=0
+        while check_process "${pid}" && [ "${count}" -lt 10 ]; do
+            sleep 1
+            count=$((count + 1))
+            log_msg "waiting process terminate... (${count}s/10s)"
+        done
+
+        if check_process "${pid}"; then
+            log_msg "send KILL signal to PID:${pid}..."
+            kill -KILL "${pid}" 2>/dev/null || true
+            sleep 1
+        fi
+        rm -f "${PID_FILE}"
+    fi
+
+    # 套接字残留会让下一次启动前网关一直报 502，这里显式清理。
+    rm -f "${SOCK_PATH}" 2>/dev/null || true
+    log_msg "${APP_NAME} stopped."
+    return 0
+}
+
+case "${1:-}" in
+start)
+    start_process
+    ;;
+stop)
+    stop_process
+    ;;
+status)
+    if status; then
+        exit 0
+    else
+        exit 3
+    fi
+    ;;
+*)
+    write_user_error "未知的运行控制指令: ${1:-<空>}（应为 start / stop / status）"
+    exit 1
+    ;;
+esac

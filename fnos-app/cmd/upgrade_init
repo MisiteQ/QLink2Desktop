@@ -1,0 +1,40 @@
+#!/bin/bash
+# 升级前钩子。
+#
+# 数据兼容性：QLink2Desktop 的持久化内容（links.json / settings.json / icons/）
+# 全部放在 TRIM_PKGVAR/data 下，升级不做任何迁移，也不改动它们。
+# 新版本对旧数据只做「读取时补齐默认值」式的向后兼容。
+#
+# 两件事：
+#   1) 写覆盖升级标记（10 分钟窗口）。部分飞牛版本在覆盖安装流程里
+#      也会触发卸载钩子——没有这个标记的话，uninstall_init 会把本项目
+#      创建的全部 qlink2d.* 桌面图标当成「正在卸载」清掉，
+#      升级完成后桌面上剩下的就是一排「已被卸载」的僵尸图标。
+#      （此机制已在真机上长期验证。）
+#   2) 确认服务已停止，避免升级期间新旧进程同时写一份数据。
+set -u
+
+TRIM_PKGVAR="${TRIM_PKGVAR:-/var/apps/qlink2desktop/var}"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+UPGRADE_FLAG="/tmp/qlink2desktop-upgrading"
+
+date +%s > "${UPGRADE_FLAG}" 2>/dev/null || true
+chmod 0666 "${UPGRADE_FLAG}" 2>/dev/null || true
+
+if [ -r "${PID_FILE}" ]; then
+    pid="$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')"
+    if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+        kill -TERM "${pid}" 2>/dev/null || true
+        count=0
+        while kill -0 "${pid}" 2>/dev/null && [ "${count}" -lt 10 ]; do
+            sleep 1
+            count=$((count + 1))
+        done
+        kill -KILL "${pid}" 2>/dev/null || true
+    fi
+    rm -f "${PID_FILE}"
+fi
+
+rm -f "${TRIM_APPDEST:-}/app.sock" 2>/dev/null || true
+
+exit 0

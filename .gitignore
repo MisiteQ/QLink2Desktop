@@ -1,0 +1,28 @@
+# ---- Go ----
+*.exe
+*.exe~
+*.test
+*.out
+vendor/
+
+# ---- 构建产物 ----
+# 交叉编译出的 Linux 二进制（打包脚本会临时放进 fnos-app/app/）
+fnos-app/app/qlink2desktop
+# 仓库根目录的本机调试二进制
+/qlink2desktop
+# 打包脚本与 CI 的临时目录
+.build/
+dist/
+
+# ---- 安装包 ----
+*.fpk
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---- 本地 AI 工作笔记 ----
+.workbuddy/
