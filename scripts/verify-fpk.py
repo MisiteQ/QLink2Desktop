@@ -29,9 +29,9 @@ FPK_RE = re.compile(r"^qlink2desktop-(?P<ver>[0-9][^-]*)-(?P<arch>x86|arm)\.fpk$
 def resolve_version(explicit: str | None) -> str:
     """确定要复验的版本号。
 
-    刻意**不**从 VERSION 文件读：发版脚本构建完就把 VERSION 写回成下一个待用
-    版本，此时按 VERSION 去找包必然找不到（这个坑真的踩过）。这里按目录里
-    实际存在的产物反推；若同时存在多个版本，要求显式指定，避免验错包。
+    刻意**不**从 VERSION 文件读：VERSION 由人手动维护，随时可能已被改成下一个
+    待发版本，与目录里的实际产物对不上。这里按目录里实际存在的产物反推；
+    若同时存在多个版本，要求显式指定，避免验错包。
     """
     if explicit:
         return explicit

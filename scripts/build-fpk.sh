@@ -58,8 +58,8 @@ esac
 #     "这是第几次发版"的语义，用户要求改为逐次递增的短号。
 #
 # 约定：VERSION 文件里写的是**本次发包使用的版本号**，
-# scripts/release.sh 打包完成后写回 +1 的值供下次使用。
-# 直接跑本脚本不会改动 VERSION 文件，方便反复构建同一版本做验证。
+# 由人手动维护，任何打包脚本都不会改写它，
+# 方便反复构建同一版本做验证。
 VERSION_FILE="${ROOT_DIR}/VERSION"
 if [ -z "${VERSION:-}" ]; then
     if [ ! -f "${VERSION_FILE}" ]; then

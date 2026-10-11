@@ -3,7 +3,7 @@
 # 常用目标：
 #   make            等价于 make fpk（默认产出飞牛安装包）
 #   make fpk        构建当前平台的 .fpk（x86 / arm 可用 ARCH= 指定）
-#   make release    发版：版本号 patch +1，双架构一起出包
+#   make release    发版：按 VERSION 当前版本号一次性构建双架构出包（不改写 VERSION）
 #   make build      编译本机可执行文件，便于本地调试
 #   make test       运行全部单元测试
 #   make vet        go vet
@@ -15,7 +15,7 @@
 #
 # 说明：真正完成 fpk 打包的是 scripts/build-fpk.sh，
 # 它负责交叉编译、图标生成、manifest 的 platform 注入以及调用官方 fnpack。
-# 版本号存在仓库根目录的 VERSION 文件里，只有 make release 会改写它。
+# 版本号存在仓库根目录的 VERSION 文件里，由人手动维护，打包脚本只读不写。
 
 APP_NAME  := qlink2desktop
 GO       ?= $(shell command -v go 2>/dev/null || echo go)
@@ -28,7 +28,7 @@ else
 EXE :=
 endif
 
-# 版本号唯一来源：仓库根目录的 VERSION 文件（scripts/release.sh 负责递增）。
+# 版本号唯一来源：仓库根目录的 VERSION 文件（手动维护，脚本只读不写）。
 VERSION ?= $(shell tr -d '[:space:]' < VERSION 2>/dev/null || echo 1.2.2)
 
 ARCH ?= x86
@@ -44,12 +44,12 @@ all: fpk
 fpk:
 	./scripts/build-fpk.sh $(ARCH)
 
-# 双架构一起出包（不打版本号，便于同一版本反复验证）。
+# 双架构一起出包（不改写 VERSION，便于同一版本反复验证）。
 fpk-all:
 	./scripts/build-fpk.sh x86
 	./scripts/build-fpk.sh arm
 
-# 正式发版：先把版本号 +1，再一次性构建双架构，产物名带版本号。
+# 正式发版：先手动把 VERSION 改成目标版本号，再一次性构建双架构，产物名带版本号。
 release:
 	./scripts/release.sh
 

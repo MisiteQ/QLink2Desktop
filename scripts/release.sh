@@ -2,19 +2,21 @@
 #
 # QLink2Desktop —— 发版脚本
 #
-# 一次做完三件事：
-#   1. 读 VERSION 文件，取其中的值作为**本次**发版的版本号；
-#   2. 用它一次性构建 x86 / arm 两个包（同一版本号）；
-#   3. 把 VERSION 文件写回 +1 的值，供下次发版使用。
+# 读 VERSION 文件，取其中的值作为**本次**发版的版本号，
+# 用它一次性构建 x86 / arm 两个包（同一版本号）。
 #
-# 为什么版本号递增放在这里，而不是放在 build-fpk.sh 里：
-#   双架构要跑两次 build-fpk.sh，递增若写在里面，x86 和 arm 会拿到
-#   两个不同的版本号 —— 同一批发版出现两个版本，设备上的版本比较
-#   和"哪个包是最新的"就全乱了。
+# 版本号策略（与 github-plus-plus / fnmonitor / GStats 等项目一致）：
+#   VERSION 是版本号的唯一来源，脚本**只读不写**——发版后不会自动 +1。
+#   要发新版本时，先手动把 VERSION（以及 manifest 等展示位）改成目标版本号，
+#   再跑本脚本。这样仓库里不会出现「代码还没开发到、VERSION 却提前跳号」。
+#
+# 为什么双架构必须共用一个版本号：
+#   x86 和 arm 属于同一批发版，版本号必须一致，
+#   否则设备上的版本比较和「哪个包是最新的」就全乱了。
 #
 # 用法：
 #   ./scripts/release.sh            # 构建双架构
-#   ./scripts/release.sh x86        # 只构建 x86（版本号同样会递增一次）
+#   ./scripts/release.sh x86        # 只构建 x86
 #   ./scripts/release.sh x86 arm
 #
 set -euo pipefail
@@ -36,28 +38,14 @@ fi
 
 CURRENT="$(tr -d '[:space:]' < "${VERSION_FILE}")"
 
-# patch 位 +1：1.2.2 → 1.2.3。缺段自动补 0（1 → 1.0.1，1.0 → 1.0.1）。
-bump_patch() {
-    local major minor patch
-    IFS='.' read -r major minor patch <<< "$1"
-    major="${major:-0}"
-    minor="${minor:-0}"
-    patch="${patch:-0}"
-    printf '%s.%s.%s\n' "${major}" "${minor}" "$((patch + 1))"
-}
-
-NEXT="$(bump_patch "${CURRENT}")"
-
-echo "=== 发版版本号: ${CURRENT}（完成后 VERSION 文件写回 ${NEXT}）==="
+echo "=== 发版版本号: ${CURRENT}（VERSION 只读，发版后保持不变）==="
 
 for arch in "${ARCHES[@]}"; do
     VERSION="${CURRENT}" "${SCRIPT_DIR}/build-fpk.sh" "${arch}"
 done
 
-printf '%s\n' "${NEXT}" > "${VERSION_FILE}"
-
 echo
 echo "[OK] 发版完成: ${CURRENT}"
-echo "     下次发版将使用: ${NEXT}"
+echo "     下次发版请先手动修改 VERSION 文件"
 echo "     产物:"
 ls -lh "${ROOT_DIR}/${APP_NAME}-${CURRENT}"-*.fpk 2>/dev/null | sed 's/^/       /' || true
