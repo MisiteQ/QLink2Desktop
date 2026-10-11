@@ -27,6 +27,7 @@ const (
 	fileLinks    = "links.json"
 	fileSettings = "settings.json"
 	fileToggles  = "toggles.json"
+	fileForwards = "forwards.json"
 )
 
 // Store 是链接与设置的持久化仓储。
@@ -37,6 +38,8 @@ type Store struct {
 	links    map[string]domain.Link
 	hosts    map[string]domain.Host
 	settings domain.Settings
+	// forwards 保存端口转发规则。
+	forwards map[string]domain.Forward
 	// toggles 保存「容器 label 自动发现项」的启用开关。
 	// 这类条目没有完整的 Link 定义（它们由 Docker 标签动态产生），
 	// 因此单独用一个 KV 表记录用户的取舍。
@@ -57,10 +60,11 @@ func Open(dir string) (*Store, error) {
 		links:    make(map[string]domain.Link),
 		hosts:    make(map[string]domain.Host),
 		settings: domain.DefaultSettings(),
+		forwards: make(map[string]domain.Forward),
 		toggles:  make(map[string]bool),
 	}
 
-	for _, load := range []func() error{s.loadSettings, s.loadLinks, s.loadToggles, s.loadHosts} {
+	for _, load := range []func() error{s.loadSettings, s.loadLinks, s.loadForwards, s.loadToggles, s.loadHosts} {
 		if err := load(); err != nil {
 			return nil, err
 		}

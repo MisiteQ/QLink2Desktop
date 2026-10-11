@@ -8,7 +8,7 @@
  *   维护     —— 数据目录信息与导入导出
  */
 
-import { h, append, replace, notify, withBusy, field, switchBox, confirmDialog } from '../dom.js';
+import { h, append, replace, notify, withBusy, field, switchBox, confirmDialog, segmented } from '../dom.js';
 import { icon } from '../icons.js';
 import { api, isTimeout } from '../api.js';
 import { state, patch } from '../store.js';
@@ -204,7 +204,8 @@ function authCard(settings) {
 
   return card('访问控制', protectedNow
     ? '已启用口令保护：打开面板需要先登录'
-    : '当前**没有**口令保护——局域网内任何人都能打开并修改配置', [
+    // 卡片副标题走的是纯文本，不解析 markdown —— 写 **没有** 会把星号原样显示出来。
+    : '当前「没有」口令保护——局域网内任何人都能打开并修改配置', [
     !protectedNow ? h('div', { class: 'notice-bar' }, [
       icon('alert', 16),
       h('span', { class: 'grow', text: '建议设置访问口令，尤其是在同一网络下有其它设备时。' }),
@@ -423,18 +424,6 @@ function saveButton(onClick) {
     class: 'btn primary', type: 'button',
     onclick: (e) => withBusy(e.currentTarget, onClick),
   }, ['保存']);
-}
-
-function segmented(items, current, onChange) {
-  return h('div', { class: 'segmented' }, items.map((item) => h('button', {
-    type: 'button',
-    class: item.value === current ? 'active' : '',
-    onclick: (e) => {
-      for (const btn of e.currentTarget.parentNode.children) btn.classList.remove('active');
-      e.currentTarget.classList.add('active');
-      onChange(item.value);
-    },
-  }, [item.label])));
 }
 
 function colorInput(value, onChange) {

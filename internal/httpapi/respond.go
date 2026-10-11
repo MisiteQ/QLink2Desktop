@@ -96,6 +96,8 @@ func statusForError(err error) (int, string) {
 		return http.StatusNotFound, "not_found"
 	case errors.Is(err, domain.ErrNameConflict):
 		return http.StatusConflict, "conflict"
+	case errors.Is(err, domain.ErrPortInUse):
+		return http.StatusConflict, "port_in_use"
 	case errors.Is(err, domain.ErrForbidden):
 		return http.StatusForbidden, "forbidden"
 	case errors.Is(err, errUnauthorized):

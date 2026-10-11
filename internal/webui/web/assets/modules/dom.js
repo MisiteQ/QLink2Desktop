@@ -272,6 +272,27 @@ export function field(label, control, hint) {
   ]);
 }
 
+/**
+ * 分段选择控件：[{ value, label }] → 一排互斥按钮。
+ *
+ * 放在这里而不是各视图里各写一份：它原本在 editor.js 与 settings.js 里
+ * 各有一份完全相同的实现，端口转发视图要用第三次。
+ * 三处复制同一个 DOM 组件意味着任何一处交互修正（比如选中态的同步方式）
+ * 都要改三遍，迟早会漏。
+ */
+export function segmented(items, current, onChange) {
+  return h('div', { class: 'segmented' }, items.map((item) => h('button', {
+    type: 'button',
+    class: item.value === current ? 'active' : '',
+    onclick: (e) => {
+      const box = e.currentTarget.parentNode;
+      for (const btn of box.children) btn.classList.remove('active');
+      e.currentTarget.classList.add('active');
+      onChange(item.value);
+    },
+  }, [item.label])));
+}
+
 export function emptyState(title, message, iconNode) {
   return h('div', { class: 'empty' }, [
     iconNode ? h('div', { class: 'empty-icon' }, [iconNode]) : null,

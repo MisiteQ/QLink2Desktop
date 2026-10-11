@@ -36,7 +36,7 @@ fi
 
 CURRENT="$(tr -d '[:space:]' < "${VERSION_FILE}")"
 
-# patch 位 +1：1.0.0 → 1.0.1。缺段自动补 0（1 → 1.0.1，1.0 → 1.0.1）。
+# patch 位 +1：1.2.2 → 1.2.3。缺段自动补 0（1 → 1.0.1，1.0 → 1.0.1）。
 bump_patch() {
     local major minor patch
     IFS='.' read -r major minor patch <<< "$1"

@@ -19,16 +19,20 @@ import {
 
 import * as desktop from './modules/views/desktop.js';
 import * as discovery from './modules/views/discovery.js';
+import * as forward from './modules/views/forward.js';
 import * as library from './modules/views/library.js';
 import * as settings from './modules/views/settings.js';
 import * as system from './modules/views/system.js';
 import * as help from './modules/views/help.js';
 
-const VIEWS = { desktop, discovery, library, settings, system, help };
+const VIEWS = { desktop, discovery, forward, library, settings, system, help };
 
 const NAV = [
   { key: 'desktop', label: '桌面应用', iconName: 'desktop', badge: () => state.links.length },
   { key: 'discovery', label: '服务发现', iconName: 'activity', badge: () => state.discovery.ports.length },
+  // 端口转发紧跟服务发现：发现到的端口常常就是转发的目标，
+  // 两个界面挨着能少一次来回切页。
+  { key: 'forward', label: '端口转发', iconName: 'shuffle', badge: () => state.forwards.length },
   { key: 'library', label: '图标库', iconName: 'image', badge: () => state.icons.length },
   { key: 'settings', label: '设置', iconName: 'gear' },
   { key: 'system', label: '系统与日志', iconName: 'terminal' },
@@ -324,6 +328,12 @@ function connectEvents() {
         case 'discovery':
           if (state.view === 'discovery') discovery.refresh();
           break;
+        case 'forward':
+          // 与 links 同理：事件只带"变了"，数据由前端回查。
+          // 转发规则的运行态（连接数、字节数）每时每刻都在变，
+          // 塞进事件里会让事件流变成噪声。
+          void reloadForwards();
+          break;
         default:
           break;
       }
@@ -344,6 +354,21 @@ function applySnapshot(payload) {
   renderTopbar();
   renderSidebarState();
   if (VIEWS[state.view]) VIEWS[state.view].refresh();
+}
+
+// reloadForwards 回查转发规则列表。
+//
+// 侧边栏的计数徽标也要跟着更新，所以这里无条件拉取而不是只在
+// 当前视图是转发页时才拉——否则在别的页面删了一条规则，徽标会一直停在旧数字。
+async function reloadForwards() {
+  try {
+    const res = await api.forwards.list();
+    patch({ forwards: res.items || [] });
+    renderNav();
+  } catch {
+    /* 拉取失败不影响主流程，下一次事件或手动刷新会补上 */
+  }
+  if (state.view === 'forward') forward.refresh();
 }
 
 async function loadLogsQuietly() {

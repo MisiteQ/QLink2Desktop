@@ -217,6 +217,27 @@ export const api = {
     probe: (url) => post('api/tools/probe', { url }),
   },
 
+  /* ---------------------------------------------------------- 端口转发 */
+  forwards: {
+    list: () => get('api/forwards'),
+    get: (id) => get(`api/forwards/${encodeURIComponent(id)}`),
+    create: (payload) => post('api/forwards', payload, { timeout: MUTATION_TIMEOUT_MS }),
+    update: (id, payload) => put(`api/forwards/${encodeURIComponent(id)}`, payload, { timeout: MUTATION_TIMEOUT_MS }),
+    remove: (id) => del(`api/forwards/${encodeURIComponent(id)}`, { timeout: MUTATION_TIMEOUT_MS }),
+    setEnabled: (id, enabled) => post(
+      `api/forwards/${encodeURIComponent(id)}/enabled`, { enabled }, { timeout: MUTATION_TIMEOUT_MS },
+    ),
+    probe: (id) => post(`api/forwards/${encodeURIComponent(id)}/probe`, {}),
+    connections: (id) => get(`api/forwards/${encodeURIComponent(id)}/connections`),
+    // checkPort 问的是"这个监听端口本机能不能用、被谁占着"，
+    // 与 probe（探测**目标**是否可达）是两件完全不同的事。
+    checkPort: (protocol, port, host) => get(
+      `api/forwards/port-check?protocol=${encodeURIComponent(protocol)}` +
+      `&port=${encodeURIComponent(port)}` +
+      (host ? `&host=${encodeURIComponent(host)}` : ''),
+    ),
+  },
+
   /* -------------------------------------------------------------- 系统 */
   system: {
     info: () => get('api/system'),
@@ -243,7 +264,7 @@ export const api = {
 export function subscribeEvents({ onEvent, onOpen, onError }) {
   const source = new EventSource('api/events');
 
-  const types = ['snapshot', 'links', 'status', 'log', 'discovery'];
+  const types = ['snapshot', 'links', 'status', 'log', 'discovery', 'forward'];
   for (const type of types) {
     source.addEventListener(type, (ev) => {
       let data = null;

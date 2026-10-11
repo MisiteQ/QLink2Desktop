@@ -29,7 +29,7 @@ EXE :=
 endif
 
 # 版本号唯一来源：仓库根目录的 VERSION 文件（scripts/release.sh 负责递增）。
-VERSION ?= $(shell tr -d '[:space:]' < VERSION 2>/dev/null || echo 1.0.0)
+VERSION ?= $(shell tr -d '[:space:]' < VERSION 2>/dev/null || echo 1.2.2)
 
 ARCH ?= x86
 

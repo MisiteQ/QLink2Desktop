@@ -18,6 +18,7 @@ import (
 	"github.com/MisiteQ/qlink2desktop/internal/discovery"
 	"github.com/MisiteQ/qlink2desktop/internal/domain"
 	"github.com/MisiteQ/qlink2desktop/internal/fnos"
+	"github.com/MisiteQ/qlink2desktop/internal/forward"
 	"github.com/MisiteQ/qlink2desktop/internal/logx"
 	"github.com/MisiteQ/qlink2desktop/internal/proxy"
 	"github.com/MisiteQ/qlink2desktop/internal/store"
@@ -72,6 +73,13 @@ type Deps struct {
 	Sessions *auth.Manager
 	Logs     *logx.Ring
 	Logger   *slog.Logger
+
+	// Forwards 管理四层端口转发监听。
+	//
+	// 为 nil 时接口层退化为「只读写定义、不落地监听」的只读模式，
+	// 与 Coordinator 为 nil 时的行为一致 —— 这样在没有端口权限的
+	// 开发机上也能调前端。
+	Forwards *forward.Manager
 
 	// Coordinator 为 nil 时，接口层会退化为「只读写定义、不落地」的只读模式，
 	// 便于在没有 appcenter-cli 的开发机上调试前端。
@@ -159,6 +167,13 @@ func (s *Server) Subscribers() int { return s.hub.count() }
 // 省掉一次 GET /api/links 的往返。这是异步模型下最高频的一次更新。
 func (s *Server) BroadcastStatus() { s.broadcast(EventStatusChanged, s.snapshot()) }
 
+// BroadcastForwards 通知前端「端口转发规则有变化」。
+//
+// 由装配层注入到转发管理器的 onChange 上。规则启停是同步完成的，
+// 但用户可能在另一个标签页里，或者状态是由启动恢复触发的——
+// 没有这条广播，界面就会停在旧状态直到手动刷新。
+func (s *Server) BroadcastForwards() { s.broadcast(EventForwardChanged, nil) }
+
 // BroadcastDiscovery 通知前端「端口 / 扫描结果有更新」。
 //
 // 只在一轮扫描结束时调用一次，不跟进度 —— 进度是前端自己轮询的，
@@ -227,6 +242,23 @@ func (s *Server) routes() {
 
 	api.HandleFunc("GET /api/tools/port", s.handlePickPort)
 	api.HandleFunc("POST /api/tools/probe", s.handleProbeTarget)
+
+	// 端口转发：定义（CRUD）与运行态分开，连接记录单独一个接口。
+	//
+	// 之所以不把连接记录塞进 GET /api/forwards：那个接口是列表页每次刷新
+	// 都要打的，而连接记录只在用户点开某条规则看时才需要。合并进去会让
+	// 每次列表刷新都带上成百上千条用不上的记录。
+	api.HandleFunc("GET /api/forwards", s.handleListForwards)
+	api.HandleFunc("POST /api/forwards", s.handleCreateForward)
+	// 字面量路径排在 {id} 之前读起来更清楚；Go 1.22 的 ServeMux 本身
+	// 也会优先匹配更具体的模式，不会把 "port-check" 当成一个 id。
+	api.HandleFunc("GET /api/forwards/port-check", s.handleCheckForwardPort)
+	api.HandleFunc("GET /api/forwards/{id}", s.handleGetForward)
+	api.HandleFunc("PUT /api/forwards/{id}", s.handleUpdateForward)
+	api.HandleFunc("DELETE /api/forwards/{id}", s.handleDeleteForward)
+	api.HandleFunc("POST /api/forwards/{id}/enabled", s.handleToggleForward)
+	api.HandleFunc("POST /api/forwards/{id}/probe", s.handleProbeForward)
+	api.HandleFunc("GET /api/forwards/{id}/connections", s.handleForwardConns)
 
 	api.HandleFunc("GET /api/system", s.handleSystem)
 	api.HandleFunc("GET /api/bootstrap", s.handleBootstrap)

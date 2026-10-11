@@ -23,6 +23,7 @@
 | 🔍 自动发现         | 流式解析内核套接字表 + Docker API，自动列出本机端口与容器            |
 | 🖥️ 一键上桌面       | 把端口 / 容器 / 代理 / 快捷方式注册为**飞牛原生应用**，出现在真实桌面上     |
 | 🌐 反向代理         | 局域网、公网服务统一代理成本机端口，可测试连通性、可忽略自签证书               |
+| 🔀 端口转发         | 四层 TCP / UDP 转发，SSH、远程桌面、数据库、DNS 都能穿过去，带黑白名单与连接记录 |
 | 🔗 SSH 隧道       | 其它机器（另一台 NAS、软路由、树莓派）上的服务也能放到桌面                |
 | 🏷️ Watchcow 兼容 | 直接识别 Docker Compose 里的 watchcow 标签，一键启用        |
 | 🔤 文字图标         | 内嵌点阵字模 + 配色，无图可用时现场生成一枚                        |
@@ -114,6 +115,7 @@ internal/
   store             JSON 持久化，原子写入 + 损坏文件隔离
   discovery         服务发现：procfs 套接字表 / Docker 标签 / 局域网扫描 / SSH
   proxy             反向代理：httputil.ReverseProxy + SSE 友好的传输层
+  forward           端口转发：四层 TCP/UDP 中继、访问控制、会话回收与连接记录
   fnos              飞牛桌面注册：manifest / 包树 / appcenter-cli 编排 / 图标
   gateway           统一网关：Unix Socket 监听 + CGI 转发
   auth              口令派生 + 内存会话

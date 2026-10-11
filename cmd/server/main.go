@@ -30,7 +30,7 @@ import (
 )
 
 // version 由构建脚本通过 -ldflags "-X main.version=..." 注入。
-var version = "1.0.0"
+var version = "1.2.2"
 
 // appName 是本应用在飞牛应用中心的标识。
 //

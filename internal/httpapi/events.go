@@ -31,6 +31,12 @@ const (
 	EventLog = "log"
 	// EventDiscovery：端口 / 容器发现结果更新。
 	EventDiscovery = "discovery"
+	// EventForwardChanged：端口转发规则有增删改或启停，前端应重新拉取列表。
+	//
+	// 与 links 事件同理，只推一个空通知、由前端自己回查：
+	// 转发规则的运行态（连接数、累计字节）每时每刻都在变，
+	// 把全量塞进事件里会让事件流变成噪声。
+	EventForwardChanged = "forward"
 )
 
 // hub 是最小可用的发布订阅中心。

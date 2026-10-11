@@ -5,7 +5,7 @@
  * 后者很容易出现「切到快捷方式后，上一个形态的端口还留在提交数据里」这类脏数据问题。
  */
 
-import { h, append, replace, clear, field, notify, switchBox, withBusy, modal } from '../dom.js';
+import { h, append, replace, clear, field, notify, switchBox, withBusy, modal, segmented } from '../dom.js';
 import { icon } from '../icons.js';
 import { api, isTimeout } from '../api.js';
 import { state } from '../store.js';
@@ -507,20 +507,6 @@ function fileTypesInput(model) {
 }
 
 /* ------------------------------------------------------------- 小控件 */
-
-function segmented(items, current, onChange) {
-  const buttons = items.map((item) => h('button', {
-    type: 'button',
-    class: item.value === current ? 'active' : '',
-    onclick: (e) => {
-      const box = e.currentTarget.parentNode;
-      for (const btn of box.children) btn.classList.remove('active');
-      e.currentTarget.classList.add('active');
-      onChange(item.value);
-    },
-  }, [item.label]));
-  return h('div', { class: 'segmented' }, buttons);
-}
 
 function checkbox(checked, onChange) {
   return h('input', {

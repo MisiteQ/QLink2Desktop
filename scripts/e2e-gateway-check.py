@@ -1153,6 +1153,234 @@ def main() -> int:
         "SSE 是长连接永不变空闲，Shutdown 排在前面会永远等不到，每次停止都耗满宽限",
     )
 
+    # ---- 端口转发（四层）--------------------------------------------------
+    fwd_dir = os.path.join(repo_root, "internal", "forward")
+    fwd_mgr = read_text(os.path.join(fwd_dir, "manager.go"))
+    fwd_tcp = read_text(os.path.join(fwd_dir, "tcp.go"))
+    fwd_udp = read_text(os.path.join(fwd_dir, "udp.go"))
+    fwd_acl = read_text(os.path.join(fwd_dir, "acl.go"))
+    dom_fwd = read_text(os.path.join(repo_root, "internal", "domain", "forward.go"))
+    api_fwd = read_text(os.path.join(repo_root, "internal", "httpapi", "forwards.go"))
+    store_fwd = read_text(os.path.join(repo_root, "internal", "store", "forwards.go"))
+    fwd_view = read_text(os.path.join(web_root, "modules", "views", "forward.js"))
+    help_js = read_text(os.path.join(web_root, "modules", "views", "help.js"))
+
+    check(
+        "转发监听只在 forward 包里建立，接口层不许自己 net.Listen",
+        "net.Listen" not in api_fwd and "net.ListenUDP" not in api_fwd,
+        "接口层直接监听端口 = 分层被打破，状态会散落在两个地方",
+    )
+    # 自转发（A→A）是最容易顺手配出来的错误：不会报错，只会让每个请求
+    # 被反复转发给本机，直到 fd 耗尽。
+    check(
+        "目标为本机同一个端口时必须拒绝（自转发）",
+        "func (f Forward) IsSelfForward()" in dom_fwd
+        and "IsSelfForward()" in dom_fwd.replace("func (f Forward) IsSelfForward()", "")
+        and "IsUnspecified" in dom_fwd,
+        "自转发检测缺失：8080→127.0.0.1:8080 会让流量在端口上无限自我转发",
+    )
+    check(
+        "两条规则互为转发目标时必须拒绝（两跳环）",
+        "func (m *Manager) checkLoopLocked(" in fwd_mgr
+        and "互为转发目标" in fwd_mgr,
+        "缺少环检测：A→B→A 会让数据包在两个端口间无限弹射，几秒内吃满 CPU",
+    )
+    check(
+        "UDP 会话必须被回收（UDP 没有 FIN，不回收就是泄漏）",
+        "func (u *udpFwd) reap(" in fwd_udp
+        and "func (u *udpFwd) reapLoop(" in fwd_udp
+        and "udpIdleTimeout" in fwd_udp,
+        "UDP 会话表没有回收逻辑：功能一切正常，fd 与内存却在一直涨",
+    )
+    check(
+        "TCP 转发双向搬运，且支持半关闭",
+        "io.Copy(up, src)" in fwd_tcp
+        and "io.Copy(src, up)" in fwd_tcp
+        and "CloseWrite" in fwd_tcp,
+        "少一个方向或漏了半关闭，表现是'连接正常但响应永远不回来'",
+    )
+    check(
+        "访问控制支持 IP 与 CIDR，并归一化 IPv4-mapped 地址",
+        "ParseCIDR" in fwd_acl and "func normalizeIP(" in fwd_acl and "To4()" in fwd_acl,
+        "不做归一化的话，双栈下同一条白名单会时灵时不灵",
+    )
+    # 端口被自家另一条规则占用属于确定性错误：让它落盘就会留下一条
+    # "保存了却永远起不来"的规则。必须在写盘之前拦住。
+    check(
+        "保存前先挡掉确定性冲突（Check），而不是落盘后才发现起不来",
+        "func (m *Manager) Check(" in fwd_mgr
+        and "s.checkForward(f)" in api_fwd,
+        "缺少落盘前的冲突检查：规则会长期停在'存下来了但不工作'的状态",
+    )
+    check(
+        "端口被外部程序占用时规则照常保存，但要给出告警",
+        "warning" in api_fwd and "Warning" in api_fwd,
+        "外部占用是暂时状态，不该阻止保存；但不告警用户就以为一切正常",
+    )
+    check(
+        "转发接口已注册（列表 / 增删改 / 启停 / 探测 / 连接记录）",
+        all(s in server_go for s in (
+            'GET /api/forwards"', 'POST /api/forwards"',
+            'PUT /api/forwards/{id}"', 'DELETE /api/forwards/{id}"',
+            'POST /api/forwards/{id}/enabled"',
+            'POST /api/forwards/{id}/probe"',
+            'GET /api/forwards/{id}/connections"',
+        )),
+        "转发接口注册不全",
+    )
+    check(
+        "转发规则持久化到独立文件，不与链接混在一起",
+        "fileForwards" in store_fwd
+        and 'fileForwards = "forwards.json"' in read_text(
+            os.path.join(repo_root, "internal", "store", "store.go")),
+        "转发规则应与 links.json 分开，避免一处损坏连带丢掉另一类数据",
+    )
+    # 前端：视图注册、导航入口、事件订阅三处都要有。
+    # 单测覆盖不到 import 路径写错，而那类错误的表现正是
+    # "页面能开、接口全通、点了没反应"。
+    check(
+        "前端注册了端口转发视图与导航入口",
+        "modules/views/forward.js" in app_src
+        and "key: 'forward'" in app_src
+        and "forward," in app_src.split("const VIEWS")[1][:80],
+        "app.js 没有把 forward 接进 VIEWS / NAV",
+    )
+    check(
+        "转发状态变化会广播给前端，前端订阅了该事件",
+        "EventForwardChanged" in read_text(os.path.join(repo_root, "internal", "httpapi", "events.go"))
+        and "'forward'" in read_text(os.path.join(web_root, "modules", "api.js"))
+        and "case 'forward'" in app_src,
+        "转发状态变化没有推给前端，界面会停在旧状态直到手动刷新",
+    )
+    check(
+        "转发视图提供了规则编辑、启停、目标探测与连接记录",
+        all(s in fwd_view for s in
+            ("openEditor", "api.forwards.probe", "api.forwards.connections",
+             "api.forwards.setEnabled")),
+        "转发视图缺少关键操作入口",
+    )
+    check(
+        "帮助页讲清了端口转发与端口映射的区别",
+        "端口转发" in help_js and "端口映射" in help_js,
+        "两个能力名字相近、层级不同，帮助页不讲清楚用户会选错",
+    )
+
+    # 界面文案走的是纯文本节点，**不解析 markdown**。写成 **重点** 会把两颗
+    # 星号原样显示给用户 —— 这个 bug 真实存在过（帮助页"那是**预期行为**"
+    # 与设置页"当前**没有**口令保护"），只是没人盯着这两个字看过。
+    md_hits: list[str] = []
+    views_dir = os.path.join(web_root, "modules", "views")
+    for _fn in sorted(os.listdir(views_dir)):
+        if not _fn.endswith(".js"):
+            continue
+        for _i, _line in enumerate(read_text(os.path.join(views_dir, _fn)).splitlines(), 1):
+            _s = _line.strip()
+            if _s.startswith("//") or _s.startswith("/*") or _s.startswith("*"):
+                continue  # 注释里用 ** 无所谓，它不会显示
+            if "**" in _line:
+                md_hits.append("%s:%d" % (_fn, _i))
+    check(
+        "界面文案里没有混进 markdown 星号",
+        not md_hits,
+        "视图文本是纯文本，'**重点**'会原样冒出两颗星号：" + ", ".join(md_hits[:5]),
+    )
+
+    # 代码与文档里不留外部参考实现的名字（用户明确要求）。
+    # 词刻意拆成两半拼：这个脚本自己要能搜它，又不能让自己变成命中项。
+    needle = "luc" + "ky"
+    ref_hits: list[str] = []
+    for _dirpath, _dirnames, _filenames in os.walk(repo_root):
+        _dirnames[:] = [d for d in _dirnames if d not in SKIP_DIRS]
+        for _fn in _filenames:
+            if not _fn.endswith((".go", ".js", ".md", ".py", ".sh", ".html", ".css")):
+                continue
+            _rel = os.path.relpath(os.path.join(_dirpath, _fn), repo_root)
+            if _rel == "README.md":
+                continue  # 项目来源只写在 README 一处，这是既有约定
+            if needle in read_text(os.path.join(_dirpath, _fn)).lower():
+                ref_hits.append(_rel)
+    check(
+        "代码与文档里不留外部参考实现的名字",
+        not ref_hits,
+        "用户明确要求不体现它：" + ", ".join(ref_hits[:5]),
+    )
+
+    # ---- 绑定形态与占用者诊断 --------------------------------------------
+    # 这一组守的是一个真实故障："同样的设置，别的工具能跑，这里报端口被占用"。
+    # 根因是绑定形态写死成 `:port`（Linux 上要求 IPv4 与 IPv6 两侧都空闲）。
+    listen_go = read_text(os.path.join(repo_root, "internal", "forward", "listen.go"))
+    tcp_go = read_text(os.path.join(repo_root, "internal", "forward", "tcp.go"))
+    udp_go = read_text(os.path.join(repo_root, "internal", "forward", "udp.go"))
+    procnet_go = read_text(os.path.join(repo_root, "internal", "forward", "procnet.go"))
+    who_go = read_text(os.path.join(repo_root, "internal", "forward", "who_linux.go"))
+    probe_go = read_text(os.path.join(repo_root, "internal", "forward", "probe.go"))
+    manager_go = read_text(os.path.join(repo_root, "internal", "forward", "manager.go"))
+
+    check(
+        "留空监听地址时会退让绑定形态（双栈 → 仅 IPv4 → 仅 IPv6）",
+        all(s in listen_go for s in ('proto + "4"', 'proto + "6"', "bindV4", "bindV6")),
+        "只剩双栈一种候选时，端口被占住一侧就整体启动失败 —— 这正是用户报的那个故障",
+    )
+    check(
+        "TCP / UDP 都走统一的绑定入口，不各自写裸 net.Listen",
+        "listenTCP(" in tcp_go and "listenUDP(" in udp_go
+        and 'net.Listen("tcp"' not in tcp_go and "net.ListenUDP(" not in udp_go,
+        "绕过 listenTCP/listenUDP 就等于绕过了退让逻辑与占用者诊断",
+    )
+    check(
+        "用户显式指定的监听地址不退让",
+        "bindFixed" in listen_go and "host != \"\"" in listen_go,
+        "替他改地址比如实报错更糟：他会以为自己配的地址生效了",
+    )
+    check(
+        "失败时会查出占用者（Linux 直读 /proc，不依赖 ss / lsof）",
+        "whoHoldsPort" in manager_go and "/proc/net/tcp" in who_go and "/proc/net/udp" in who_go,
+        "只报「已被其它程序占用」，用户在遇到本应用自己占用时会去找一个不存在的「其它程序」",
+    )
+    check(
+        "占用者若是本进程，提示必须指向本应用而不是 PID",
+        "Self" in who_go and "占用者是本应用自己" in manager_go,
+        "对用户报自己进程的 PID 等于没给线索",
+    )
+    check(
+        "抓 /proc 里的端口必须补零成四位十六进制",
+        'fmt.Sprintf("%04X", port)' in procnet_go,
+        "内核把 53 写成 0035，按 %X 拼成 35 会永远匹配不上（这个 bug 被单测抓过）",
+    )
+    check(
+        "退化为单栈时会告诉用户（状态里带 bind_mode）",
+        "BindMode" in manager_go and "bind_mode" in fwd_view,
+        "`[::]:18080` 在双栈与仅 IPv6 下字符串一样，不说出来用户会以为两侧都能连",
+    )
+    check(
+        "端口占用检测：接口已注册且前端有入口",
+        "GET /api/forwards/port-check" in server_go
+        and "checkPort" in read_text(os.path.join(web_root, "modules", "api.js"))
+        and "检查端口" in fwd_view,
+        "用户需要能事先问「这个端口能不能用」，而不是等保存完再看一条失败提示",
+    )
+    check(
+        "Manager 提供了只做冲突判断的入口 CheckListen",
+        "func (m *Manager) CheckListen(" in manager_go,
+        "Check 面向「保存一条完整规则」，会先要求名称非空，不能用来探测端口",
+    )
+    check(
+        "端口检测只做冲突判断，不跑完整规则校验",
+        # 必须限定在 handler 的**函数体**里断言。
+        # 第一版写的是 `"CheckListen" in api_fwd`（整文件搜），结果反向验证
+        # 时没有 FAIL —— 因为注释里也写着"这里刻意用 CheckListen"，
+        # 换个调用方式注释还在，守卫照样通过。名字出现不等于调用发生。
+        "CheckListen(" in extract_fn_body(api_fwd, "func (s *Server) handleCheckForwardPort(")
+        and "checkForward(" not in extract_fn_body(api_fwd, "func (s *Server) handleCheckForwardPort("),
+        "用 Check 会先要求规则名非空，探测一个端口号时返回「规则名称不能为空」"
+        "（这个 bug 是探测接口的真实验证抓出来的）",
+    )
+    check(
+        "探测结果会区分「双栈可用」与「只能单栈」",
+        "Degraded" in probe_go and "只能退化为仅" in api_fwd,
+        "无条件报「可以监听」会让用户以为两侧访客都能连上",
+    )
+
     # ---- 语义色按钮的静态守卫 --------------------------------------------
     # 用户提的是"界面太素雅"，所以按钮不能全是同一个灰底。
     # 守的是"语义色真的有人用"，而不只是"CSS 里定义了"。

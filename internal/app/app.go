@@ -7,6 +7,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -17,7 +18,9 @@ import (
 
 	"github.com/MisiteQ/qlink2desktop/internal/auth"
 	"github.com/MisiteQ/qlink2desktop/internal/discovery"
+	"github.com/MisiteQ/qlink2desktop/internal/domain"
 	"github.com/MisiteQ/qlink2desktop/internal/fnos"
+	"github.com/MisiteQ/qlink2desktop/internal/forward"
 	"github.com/MisiteQ/qlink2desktop/internal/httpapi"
 	"github.com/MisiteQ/qlink2desktop/internal/logx"
 	"github.com/MisiteQ/qlink2desktop/internal/proxy"
@@ -63,6 +66,7 @@ type App struct {
 	Store       *store.Store
 	Service     *fnos.Service
 	Proxy       *proxy.Manager
+	Forwards    *forward.Manager
 	Coordinator *Coordinator
 	Scanner     *discovery.Scanner
 	Docker      *discovery.DockerClient
@@ -109,8 +113,11 @@ func New(opts Options) (*App, error) {
 		Docker:   docker,
 	})
 
-	// 3) 反向代理。
+	// 3) 反向代理（应用层）。
 	pm := proxy.NewManager(proxy.WithLogger(logger))
+
+	// 3.5) 端口转发（传输层）。
+	fm := forward.NewManager(forward.WithLogger(logger))
 
 	// 4) 飞牛桌面注册。
 	svc := fnos.NewService(fnos.Options{
@@ -160,6 +167,7 @@ func New(opts Options) (*App, error) {
 		Store:       st,
 		Service:     svc,
 		Proxy:       pm,
+		Forwards:    fm,
 		Scanner:     scanner,
 		Docker:      docker,
 		Sessions:    sessions,
@@ -174,6 +182,24 @@ func New(opts Options) (*App, error) {
 		PortBase:    opts.PortBase,
 	})
 
+	// 7.5) 转发规则的状态变化（启停、监听失败）也要推给前端。
+	//
+	// 它不经过后台队列，是同步发生的，因此不需要像 Coordinator 那样
+	// 等装配完成——但注册时机仍然放在这里：此时 server 已经存在。
+	fm.SetOnChange(server.BroadcastForwards)
+
+	// 7.6) 恢复上次已启用的转发规则。
+	//
+	// 必须在返回之前做完，而不是丢给后台对账：用户装完应用打开面板，
+	// 期望的是"规则已经在跑"。而监听一个端口是毫秒级的操作，
+	// 完全没有理由推迟——推迟只会让"刚启动的那一小段时间"变成
+	// 一个行为不确定的窗口。
+	//
+	// 失败**不阻断启动**，只记日志：一条规则端口被占，不该让整个应用起不来。
+	if failed := restoreForwards(fm, st.ListForwards()); len(failed) > 0 {
+		logger.Warn("部分端口转发规则未能启动", "count", len(failed), "failed", failed)
+	}
+
 	// 8) 把「后台任务引起的状态变化」接到 SSE 上。
 	//
 	// 这一步是异步响应模型的最后一公里：接口层受理后立即返回，
@@ -186,6 +212,7 @@ func New(opts Options) (*App, error) {
 		Store:       st,
 		Service:     svc,
 		Proxy:       pm,
+		Forwards:    fm,
 		Coordinator: coord,
 		Scanner:     scanner,
 		Docker:      docker,
@@ -250,7 +277,32 @@ func (a *App) Supervise(ctx context.Context) {
 // 不会出现监听还在、处理器已死的中间态。
 func (a *App) Close() {
 	a.Coordinator.Stop()
+	// 转发监听必须显式停掉：它们是本进程额外持有的监听 fd，
+	// 进程退出时虽然会被系统回收，但「先释放端口再关接口」能保证
+	// 重启后立刻能重新绑定（否则要等 TIME_WAIT 与内核回收）。
+	a.Forwards.StopAll()
 	a.CloseEvents()
+}
+
+// restoreForwards 在启动时恢复全部已启用的转发规则。
+//
+// 返回失败清单而不是单个错误：一条规则端口被占，不该让其它规则跟着起不来。
+// 这也是它不返回 error 的原因——调用方需要的是"哪几条没起来"，
+// 而不是"恢复失败了"这样一个无法据此行动的结论。
+func restoreForwards(m *forward.Manager, list []domain.Forward) []string {
+	if m == nil {
+		return nil
+	}
+	var failed []string
+	for _, f := range list {
+		if !f.Enabled {
+			continue
+		}
+		if err := m.Apply(f); err != nil {
+			failed = append(failed, fmt.Sprintf("「%s」: %v", f.Key(), err))
+		}
+	}
+	return failed
 }
 
 // CloseEvents 断开所有 SSE 长连接。
