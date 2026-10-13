@@ -2,7 +2,10 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <!-- interactive-widget=resizes-content：安卓软键盘弹出时压缩内容区，
+       而不是把整个视口顶上去。没有它，输入框获得焦点时页面会被推到上面，
+       底部固定条与正在填的表单会一起错位。 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="color-scheme" content="light dark">
   <meta name="description" content="QLink2Desktop —— 把本机端口、Docker 容器与远端服务一键放到飞牛桌面">
   <meta name="qlink-version" content="__V__">

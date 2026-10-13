@@ -98,9 +98,42 @@ async function bootstrap() {
     connectEvents();
     navigate(location.hash.replace('#', '') || 'desktop', false);
     loadLogsQuietly();
+    refreshBadges();
   } catch (err) {
     bootFailed(err, '界面渲染');
   }
+}
+
+// refreshBadges 把各页面的**条目数**拉齐，让侧边栏徽标一进来就是对的。
+//
+// 为什么需要它：徽标数字取自 `state.links / discovery.ports / forwards / icons`，
+// 而这四处原先各自只在自己页面的 mount() 里填充。于是没进过那个页面就没有数据，
+// 徽标要等用户点进去才出现 —— 用户的原话是"每次都得点击一下才能显示出来那个数值"。
+// 这不是渲染慢，是**数据从来没被拉过**。
+//
+// 四个请求并发发出，任一失败都只默默跳过：徽标是辅助信息，不该因为它
+// 把启动流程拖住或弹出报错（真正的错误由各自页面在用户主动操作时给出）。
+async function refreshBadges() {
+  const tasks = [
+    api.links.list().then((res) => patch({ links: res.items || res || [] })),
+    api.forwards.list().then((res) => patch({ forwards: res.items || [] })),
+    api.icons.list().then((res) => patch({ icons: res.items || [] })),
+  ];
+  // 端口这一格**刻意不主动拉**：唯一能拿到端口列表的接口是 discovery.ports，
+  // 而它带 force 就会去扫真实网段 —— 在用户没要求的时候发起扫描是越权的，
+  // 也会让首次打开变慢。所以这里的规矩是：只有"用户已经扫过、
+  // 或服务端缓存里有上次结果"时才填，否则徽标显示为 0（即不显示）。
+  // 换句话说，端口徽标的"缺失"是诚实的，其余三个不该有这个现象。
+  if (state.discovery.ports.length === 0) {
+    tasks.push(
+      api.discovery.ports().then((res) => {
+        const items = Array.isArray(res) ? res : (res && res.items) || [];
+        if (items.length) patch({ discovery: { ...state.discovery, ports: items } });
+      }),
+    );
+  }
+  const settled = await Promise.allSettled(tasks);
+  if (settled.some((s) => s.status === 'fulfilled')) renderNav();
 }
 
 // bootFailed 把启动失败的原因明确摆到界面上。
@@ -169,8 +202,21 @@ function renderNav() {
       onclick: () => navigate(item.key),
     }, [
       h('span', { class: 'nav-icon' }, [icon(item.iconName, 17)]),
-      h('span', { text: item.label }),
-      badge ? h('span', { class: 'nav-badge', text: String(badge) }) : null,
+      // 文字必须有自己的 class：窄屏要隐藏的是「文字」这一种语义。
+      // 早先没有这个 class，窄屏只能写 `span:not(.nav-badge){display:none}`，
+      // 而图标也是 span —— 于是图标连文字一起被藏掉，七个功能项全变成
+      // 看不见、只有 37×14px 的空白按钮。
+      h('span', { class: 'nav-label', text: item.label }),
+      // 计数为 0 时**不显示徽标**：一枚写着 0 的角标没有信息量，
+      // 反而让人以为"这里出错了"。
+      badge > 0
+        ? h('span', {
+            class: `nav-badge${badge > 99 ? ' nav-badge-wide' : ''}`,
+            // 超过两位数就缩成 99+：否则「104」会把图标顶歪、把邻居挤变形
+            text: badge > 99 ? '99+' : String(badge),
+            title: `${item.label} 共 ${badge} 项`,
+          })
+        : null,
     ]);
   }));
 }

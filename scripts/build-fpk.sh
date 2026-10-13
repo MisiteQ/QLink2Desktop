@@ -64,16 +64,28 @@ VERSION_FILE="${ROOT_DIR}/VERSION"
 if [ -z "${VERSION:-}" ]; then
     if [ ! -f "${VERSION_FILE}" ]; then
         echo "!! 缺少版本文件 ${VERSION_FILE}" >&2
-        echo "   请写入形如 1.2.2 的版本号，或用 VERSION=x.y.z 显式指定。" >&2
+        echo "   请写入形如 1.2.4 的版本号，或用 VERSION=x.y.z 显式指定。" >&2
         exit 1
     fi
     VERSION="$(tr -d '[:space:]' < "${VERSION_FILE}")"
 fi
 VERSION="${VERSION#v}"
 if ! printf '%s' "${VERSION}" | grep -Eq '^[0-9]+(\.[0-9]+)*$'; then
-    echo "!! 版本号格式非法: ${VERSION}（应形如 1.2.2）" >&2
+    echo "!! 版本号格式非法: ${VERSION}（应形如 1.2.4）" >&2
     exit 1
 fi
+
+# 官方打包工具 fnpack 的版本 —— **这是第三方工具的版本号，不是本应用的**。
+#
+# 两者曾经恰好都是 1.2.3，于是被写成同一个字面量；按"改版本号"批量替换时
+# 它跟着变成了 1.2.4，而官方静态资源上没有 1.2.4 → 下载 404 → 打包整体失败。
+# 这种"两个版本号恰好同名"的耦合，只有等到其中一方单独滚动时才会炸，
+# 而且炸的方式是"打包挂了"，很难联想到版本号。
+#
+# 所以：这里必须用独立的变量名、写在显眼处，并且**不参与**本应用版本号的批量替换。
+# 升 fnpack 前先确认官方静态资源上真有这个版本：
+#   curl -sI https://static2.fnnas.com/fnpack/fnpack-<ver>-windows-amd64
+FNPACK_VERSION="1.2.3"
 
 echo "=== QLink2Desktop fpk 构建 [${TAG}] version=${VERSION} ==="
 
@@ -119,7 +131,8 @@ resolve_fnpack() {
         return 0
     fi
 
-    local version="1.2.3"
+    # 用脚本顶部的 FNPACK_VERSION（官方工具版本），**不要**用 VERSION（本应用版本）
+    local version="${FNPACK_VERSION}"
     local base="https://static2.fnnas.com/fnpack"
     local os_name arch_name url_file local_name
     os_name="$(uname -s)"
@@ -226,35 +239,8 @@ fi
 chmod +x "${BIN_PATH}"
 chmod +x "${STAGE_APP}/cmd/"* 2>/dev/null || true
 
-# ---------------------------------------------------------------- 4. 打包
-
-# 产物文件名带版本号：并排放几个包时一眼能分清谁是谁，
-# 也避免"这个 qlink2desktop-x86.fpk 到底是哪一版"这种靠时间戳猜的处境。
-FPK_OUT="${ROOT_DIR}/${APP_NAME}-${VERSION}-${TAG}.fpk"
-rm -f "${FPK_OUT}" 2>/dev/null || true
-
-if [ -n "${FNPACK}" ]; then
-    echo "--> 使用官方 fnpack 打包: ${FNPACK}"
-    # fnpack 必须在包目录内运行（产物落在当前工作目录）。
-    (
-        cd "${STAGE_APP}"
-        "${FNPACK}" build
-    ) | sed 's/^/    /'
-    if [ ! -f "${STAGE_APP}/${APP_NAME}.fpk" ]; then
-        echo "!! fnpack 未产出 ${APP_NAME}.fpk" >&2
-        exit 1
-    fi
-    mv "${STAGE_APP}/${APP_NAME}.fpk" "${FPK_OUT}"
-else
-    echo "--> fnpack 不可用，退回到手工打包（app.tgz + md5 checksum）。"
-    manual_pack "${STAGE_APP}" "${FPK_OUT}"
-fi
-
-echo "[OK] 构建完成: ${FPK_OUT}"
-ls -lh "${FPK_OUT}"
-
 # ---------------------------------------------------------------- 手工打包
-
+#
 # 手工路径必须产出与 fnpack 完全一致的结构（已用官方工具实测解包比对过）：
 #
 #   <fpk>
@@ -265,6 +251,10 @@ ls -lh "${FPK_OUT}"
 #   ├── wizard/         安装 / 卸载向导
 #   ├── ICON.PNG
 #   └── ICON_256.PNG
+#
+# 函数定义必须排在调用点之前 —— POSIX sh 是边读边执行的，定义在文件末尾的话
+# 调用处会直接 `command not found`。这条兜底路径平时不走（fnpack 一直可用），
+# 于是一直没被发现是坏的：兜底路径不试一次，就等于没有兜底。
 manual_pack() {
     local app_dir="$1"
     local out="$2"
@@ -294,3 +284,30 @@ manual_pack() {
 
     tar -czf "${out}" -C "${work}" manifest app.tgz cmd config wizard ICON.PNG ICON_256.PNG
 }
+
+# ---------------------------------------------------------------- 4. 打包
+
+# 产物文件名带版本号：并排放几个包时一眼能分清谁是谁，
+# 也避免"这个 qlink2desktop-x86.fpk 到底是哪一版"这种靠时间戳猜的处境。
+FPK_OUT="${ROOT_DIR}/${APP_NAME}-${VERSION}-${TAG}.fpk"
+rm -f "${FPK_OUT}" 2>/dev/null || true
+
+if [ -n "${FNPACK}" ]; then
+    echo "--> 使用官方 fnpack 打包: ${FNPACK}"
+    # fnpack 必须在包目录内运行（产物落在当前工作目录）。
+    (
+        cd "${STAGE_APP}"
+        "${FNPACK}" build
+    ) | sed 's/^/    /'
+    if [ ! -f "${STAGE_APP}/${APP_NAME}.fpk" ]; then
+        echo "!! fnpack 未产出 ${APP_NAME}.fpk" >&2
+        exit 1
+    fi
+    mv "${STAGE_APP}/${APP_NAME}.fpk" "${FPK_OUT}"
+else
+    echo "--> fnpack 不可用，退回到手工打包（app.tgz + md5 checksum）。"
+    manual_pack "${STAGE_APP}" "${FPK_OUT}"
+fi
+
+echo "[OK] 构建完成: ${FPK_OUT}"
+ls -lh "${FPK_OUT}"

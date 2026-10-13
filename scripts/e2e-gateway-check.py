@@ -852,7 +852,11 @@ ROOT_ABS_PATTERNS = (
     re.compile(r"'/assets/'\s*\+"),
 )
 SOURCE_SUFFIXES = (".go", ".js", ".mjs", ".html")
-SKIP_DIRS = {"node_modules", ".git", ".build", "vendor", "__pycache__", "data"}
+# 扫描仓库源码时一律跳过这些目录。
+# `.workbuddy/` 也在这里：它是助手的工作目录（在 .gitignore 第 28 行），
+# 不属于交付内容 —— 里面的工作笔记会引用"用户要求不体现的那个名字"，
+# 那是在记录要求本身，不该被当成仓库里残留了它。
+SKIP_DIRS = {"node_modules", ".git", ".build", ".workbuddy", "vendor", "__pycache__", "data"}
 
 
 def read_text(path: str) -> str:
@@ -1303,6 +1307,123 @@ def main() -> int:
         "代码与文档里不留外部参考实现的名字",
         not ref_hits,
         "用户明确要求不体现它：" + ", ".join(ref_hits[:5]),
+    )
+
+    # ---- 窄屏导航：一个「元素存在」查不出来的可见性故障 ----------------------
+    # 用户报「手机模式下左侧的侧边栏没有了，不能切换功能区」。根因是窄屏规则
+    # `.nav-item span:not(.nav-badge){display:none}` —— 本意「只留图标」，
+    # 但图标本身也是 span，于是图标与文字一起被藏掉，七个功能项变成
+    # 看不见、仅 37×14px 的空白按钮。
+    # 静态守卫在这里格外关键：图标一直在 DOM 里、`hidden` 属性从未被设置过，
+    # 任何「元素存在吗」的断言都看不见它。
+    style_css = read_text(os.path.join(web_root, "style.css"))
+    app_js = read_text(os.path.join(web_root, "app.js"))
+    # 剥掉注释再判断 —— 这条坑项目里踩过一次（见上面 [hidden] 那条）：解释旧写法的
+    # 注释里同样写着旧规则原文，不剥离的话"规则早删了"也会被判成"还在"。
+    style_code = re.sub(r"/\*.*?\*/", "", style_css, flags=re.S)
+    narrow_css = extract_fn_body(style_code, "@media (max-width: 860px)")
+
+    check(
+        "窄屏样式块存在",
+        bool(narrow_css),
+        "没有窄屏适配，手机上就是一坨挤在一起的桌面布局",
+    )
+    check(
+        "不再用「元素类型 + :not(class)」隐藏导航内容",
+        "span:not(" not in style_code,
+        "图标本身也是 span —— 这种写法会把图标连文字一起藏掉（用户报过的故障）",
+    )
+    # 断言限定在 renderNav 的**函数体**里，并且带上 `class:` 前缀。
+    # 整文件搜 "nav-label" 是骗得过去的：改名成 'xnav-label' 仍含这个子串，
+    # 注释里提一句也能让它通过 —— 「名字出现」不等于「真的用上了」
+    # （这条坑本项目今天在 CheckListen / 外部参考名两处各踩过一次）。
+    nav_body = extract_fn_body(app_js, "function renderNav(")
+    check(
+        "要隐藏的文字有自己的 class，而不是「所有 span」",
+        "class: 'nav-label'" in nav_body and ".nav-label" in style_code,
+        "按语义给 class 才不会误伤同一元素类型的兄弟节点；"
+        "且必须确认它真的挂在导航项的文字节点上，而不只是名字出现在文件里",
+    )
+    check(
+        "窄屏下导航图标与功能名都没被 display:none 掉",
+        not [
+            ln for ln in narrow_css.splitlines()
+            if "display: none" in ln and ("nav-icon" in ln or "nav-label" in ln)
+        ],
+        "窄屏只该去掉品牌名与状态文字，图标和功能名必须留着",
+    )
+    check(
+        "窄屏下导航改为底部固定条（拇指够得到）",
+        "position: fixed" in narrow_css and "bottom: 0" in narrow_css,
+        "飞牛 App 自带标题栏已占掉顶部两行，导航再放顶部就又挤又难按",
+    )
+    check(
+        "触摸目标不小于 44px",
+        "min-height: 44px" in narrow_css or "min-height: 46px" in narrow_css,
+        "37×14px 的按钮手指点不准 ——「不能切换」的真实体感就是这个",
+    )
+    check(
+        "内容区给底部条留了空间，并避开全面屏手势条",
+        "env(safe-area-inset-bottom" in narrow_css and ".content" in narrow_css,
+        "底部条是 fixed、不占文档流：不留白，最后一张卡片永远滚不到",
+    )
+
+    # 底部条的尺寸必须**两处同源**。早先是 .sidebar 写 46、.content 写 78 两个
+    # 互不相干的数字；改了其中一处，另一处就静默失配 —— 表现是"最后一张卡片
+    # 被压在栏下面"或"底部空一大截"，而单看任意一边都是对的。
+    # 静态这里守"同源"，真浏览器那边守"渲染出来确实够大"（见 browser-mobile-check.js）。
+    sidebar_rule = extract_fn_body(narrow_css, ".sidebar {")
+    content_rule = extract_fn_body(narrow_css, ".content {")
+    check(
+        "底部条高度与内容区留白共用同一个变量（不要两个写死的数字）",
+        "--navbar-h" in narrow_css
+        and "var(--navbar-h)" in sidebar_rule
+        and "var(--navbar-h)" in content_rule,
+        "两处写死的数字迟早不同步：改了条高忘了 content，卡片就被压在栏下面",
+    )
+    # 图标大小同理：只断言"图标元素在 DOM 里"抓不住"图标被改小"。
+    # 反向验证时把 22px 改成 14px，除了这条没有任何一条会 FAIL。
+    icon_rule = extract_fn_body(narrow_css, ".nav-item .nav-icon svg {")
+    icon_px = re.search(r"width:\s*(\d+)px", icon_rule)
+    check(
+        "窄屏导航图标不小于 20px",
+        icon_px is not None and int(icon_px.group(1)) >= 20,
+        f"当前 {icon_px.group(1) + 'px' if icon_px else '取不到'} —— "
+        "图标小到看不清时，「可见 / 能点」类断言仍然全绿，只有量尺寸能发现",
+    )
+    check(
+        "窄屏导航有真浏览器回归（规矩不能只写在注释里）",
+        os.path.isfile(os.path.join(repo_root, "scripts", "browser-mobile-check.js"))
+        and "browser-mobile-check.js" in read_text(os.path.join(repo_root, "scripts", "browser-e2e.py")),
+        "静态规则守不住「图标被藏」，得有人在真视口里量尺寸、按真实坐标点",
+    )
+
+    # ---- 打包脚本：两个「名字撞车 / 顺序」陷阱 --------------------------------
+    # 这两条都是升版本号时才炸的雷，而且炸的方式是"打包直接挂了"，
+    # 很难联想到版本号 —— 值得静态守一下。
+    build_sh = read_text(os.path.join(repo_root, "scripts", "build-fpk.sh"))
+    check(
+        "打包脚本没有 CRLF 行尾",
+        b"\r\n" not in open(os.path.join(repo_root, "scripts", "build-fpk.sh"), "rb").read(),
+        "Windows 上用文本模式改 shell 脚本会写入 CRLF，真机 `#!/bin/sh\\r` 直接 "
+        "bad interpreter —— 构建与安装钩子全挂",
+    )
+    check(
+        "第三方工具 fnpack 的版本号独立成变量，不跟随本应用版本号",
+        'FNPACK_VERSION="' in build_sh
+        and 'local version="${FNPACK_VERSION}"' in build_sh,
+        "两者曾经恰好都是 1.2.3 而写成同一个字面量；按「改版本号」批量替换后 "
+        "fnpack 1.2.4 在官方静态资源上不存在 → 下载 404 → 打包整体失败",
+    )
+    # POSIX sh 是边读边执行的：函数定义排在调用点之后，调用处直接 command not found。
+    # 这条兜底路径平时不走（fnpack 一直可用），于是一直没被发现是坏的。
+    _def_at = build_sh.find("manual_pack() {")
+    _call_at = build_sh.find('manual_pack "${STAGE_APP}"')
+    check(
+        "手工打包函数定义在调用点之前（兜底路径不能只是写着看）",
+        _def_at >= 0 and _call_at >= 0 and _def_at < _call_at,
+        f"定义于 {_def_at}、调用于 {_call_at} —— POSIX sh 边读边执行，"
+        "定义在末尾会导致 command not found。兜底路径不试一次，就等于没有兜底",
     )
 
     # ---- 绑定形态与占用者诊断 --------------------------------------------

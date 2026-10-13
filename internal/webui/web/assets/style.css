@@ -735,21 +735,143 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
 .port-item .meta .line1 { font-size: .82rem; font-weight: 500; }
 .port-item .meta .line2 { font-size: .73rem; color: var(--text-muted); }
 
+/* ---------------------------------------------------------------- 窄屏
+   手机 / 窄窗口下，导航从左侧栏改为**底部固定条**。
+
+   为什么不继续用"顶部图标条"：飞牛的 App 在页面之上还有自己的标题栏与
+   系统状态栏，窄屏的顶部空间已经被吃掉两行，而底部是拇指最容易够到的位置。
+
+   这里修的是一个真实故障（用户："手机模式下侧边栏没有了，不能切换功能区"）。
+   旧规则是 `.nav-item span:not(.nav-badge) { display: none }` —— 本意"只留图标"，
+   但**图标本身也是 span**，于是图标与文字一起被隐藏，七个功能项统统变成
+   看不见、仅 37×14px 的空白按钮：点不准，也不知道哪个是哪个。
+   教训：`元素类型 + :not(某 class)` 会把同类兄弟节点一并命中。
+   要隐藏的是"文字"这种**语义**，就得给它自己的 class（见 app.js 的 nav-label）。
+
+   这条故障能溜过全部既有校验，是因为图标 span 一直在 DOM 里、`hidden` 属性
+   也没被设置过 —— **"元素存在"的断言看不见"被 display:none 藏起来"**。
+   所以浏览器级的验证一律用 checkVisibility()，并且要量触摸目标的实际尺寸。 */
+/* 底部条的尺寸集中成变量，两处引用同一个来源：
+   .sidebar 的 min-height 与 .content 的 padding-bottom。
+   早先是两个写死的数（46 / 78），改了栅格高度却忘了 content 的话，
+   最后一张卡片会被压在栏下面 —— 那种错很难一眼看出来。
+   --navbar-h 不含安全区；安全区在各自的计算里再加一次。 */
 @media (max-width: 860px) {
-  .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  :root { --navbar-h: 58px; }
+
+  .app { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+
   .sidebar {
-    flex-direction: row; align-items: center; gap: 4px;
-    border-right: 0; border-bottom: 1px solid var(--border);
-    padding: 8px 10px; overflow-x: auto;
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+    flex-direction: row; align-items: stretch; gap: 2px;
+    border-right: 0; border-bottom: 0;
+    border-top: 1px solid var(--border);
+    /* 桌面端 .sidebar 用的是 14px 10px，窄屏必须覆盖成紧凑值，
+       否则每个按钮的 6px 内边距会变成两层、整条栏被撑高 */
+    padding: 6px 8px;
+    padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px));
+    min-height: calc(var(--navbar-h) + env(safe-area-inset-bottom, 0px));
+    box-sizing: border-box;
+    overflow-x: auto; overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    /* 背景要**不透明**：半透明会让下面的内容透出来，滚动时一片糊 */
+    background: var(--bg-elevated);
+    /* 只有上缘一道极淡的分隔，不再用大投影 —— 那是"浮起来的抽屉"的语汇，
+       底部标签栏应该是页面的一部分 */
+    box-shadow: 0 -1px 0 var(--border), 0 -12px 24px -22px rgba(15, 23, 42, .28);
   }
-  .brand { padding: 2px 8px 2px 2px; }
-  .brand-text { display: none; }
-  .nav { flex-direction: row; }
-  .nav-item { padding: 7px 10px; }
-  .nav-item span:not(.nav-badge) { display: none; }
-  .nav-badge { margin-left: 4px; }
-  .sidebar-foot { border-top: 0; padding-top: 0; flex-direction: row; }
+  .sidebar::-webkit-scrollbar { display: none; }
+
+  /* 应用名由飞牛的标题栏显示，窄屏再占一行是浪费 */
+  .brand { display: none; }
+
+  /* 每个按钮等分宽度：宽度固定成内容大小时，七项加起来会溢出容器，
+     于是状态点被挤出屏幕外（用户截图里那两个点就顶在最右边）。
+     flex:1 + min-width:0 让它们均匀铺满、且不会因文字长度互相挤压。 */
+  .nav { flex: 1 1 auto; flex-direction: row; gap: 0; min-width: 0; }
+
+  .nav-item {
+    position: relative;
+    flex: 1 1 0; min-width: 0;
+    flex-direction: column; justify-content: center; align-items: center;
+    gap: 4px;
+    padding: 6px 2px;
+    min-height: 46px;
+    border-radius: 12px;
+    font-size: .625rem; line-height: 1.1; text-align: center;
+  }
+
+  /* 宽屏那条 `flex: 0 0 18px` 在纵向布局下会变成"高度 18px"，
+     撑不住放大的图标，必须清掉 */
+  .nav-item .nav-icon { flex: 0 0 auto; height: 22px; }
+  .nav-item .nav-icon svg { width: 22px; height: 22px; }
+
+  /* 图标与文字用同一套深浅：都随选中态一起变，不再一个浓一个淡 */
+  .nav-item { color: var(--text-muted); }
+  .nav-item.active { color: var(--accent); }
+
+  .nav-label {
+    white-space: nowrap; line-height: 1.1;
+    max-width: 100%;
+    /* 屏再窄也不许换行、不许把邻居挤变形 */
+    overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* 选中态：图标 + 文字一起染色，再加一层柔和的圆角底。
+     横向排列时宽屏左侧那道实心竖条失去意义，直接去掉 ——
+     留在顶上会变成一小截突兀的色块。 */
+  .nav-item.active {
+    background: var(--accent-soft);
+    box-shadow: none;
+  }
+  .nav-item.active .nav-icon { color: var(--accent); }
+
+  /* 徽标浮在图标右上角：纵向布局里它会把有徽标的那一项撑得比邻居高。
+     图标居中、徽标相对它定位，所以这里按图标中心算左右偏移，而不是贴到按钮边。 */
+  .nav-item .nav-badge {
+    position: absolute;
+    top: 2px; left: calc(50% + 5px); right: auto;
+    margin: 0; padding: 0 5px;
+    font-size: .5625rem; font-weight: 700; line-height: 16px;
+    min-width: 16px; height: 16px; box-sizing: border-box;
+    border-radius: 99px;
+    /* 描边同底色，徽标压在图标上时仍能读出边界 */
+    box-shadow: 0 0 0 2px var(--bg-elevated);
+    background: var(--accent-solid); color: var(--accent-on);
+    pointer-events: none;
+  }
+
+  /* 状态点：不再是"挤在最右的边缘装饰"，而是收成一个独立小格。
+     margin-left:auto 在等分布局里仍把它顶到末尾，但留出了与最后一项的间距。 */
+  .sidebar-foot {
+    flex: 0 0 auto; flex-direction: row; align-items: center;
+    gap: 2px; margin-left: 4px;
+    padding: 0 2px 0 8px; border-top: 0;
+    border-left: 1px solid var(--border);
+  }
+  .pip { padding: 4px; }
+  .pip .dot { width: 6px; height: 6px; flex: 0 0 6px; }
   .pip-text { display: none; }
-  .content { padding: 14px 14px 40px; }
+
+  /* 底部条是 fixed 的、不占文档流 —— 内容区必须自己留出它的高度（同一个
+     --navbar-h 再加一点余量），否则最后一张卡片永远被压在栏下面。 */
+  .content {
+    padding: 14px 14px calc(var(--navbar-h) + 24px + env(safe-area-inset-bottom, 0px));
+  }
   .topbar { padding: 12px 14px 10px; }
+}
+
+/* 超窄屏（小屏手机竖屏）：图标缩小一档、内边距收紧，让七个标签仍排得下 */
+@media (max-width: 400px) {
+  :root { --navbar-h: 56px; }
+  .sidebar { padding: 5px 6px; padding-bottom: calc(5px + env(safe-area-inset-bottom, 0px)); gap: 0; }
+  .nav-item { gap: 3px; padding: 5px 1px; border-radius: 10px; font-size: .5625rem; }
+  .nav-item .nav-icon { height: 20px; }
+  .nav-item .nav-icon svg { width: 20px; height: 20px; }
+  .nav-item .nav-badge {
+    top: 1px; left: calc(50% + 4px);
+    font-size: .5rem; line-height: 15px; min-width: 15px; height: 15px; padding: 0 4px;
+  }
 }

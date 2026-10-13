@@ -34,10 +34,15 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NODE_SCRIPT = os.path.join(ROOT, "scripts", "browser-boot-check.js")
+MOBILE_SCRIPT = os.path.join(ROOT, "scripts", "browser-mobile-check.js")
 E2E_SCRIPT = os.path.join(ROOT, "scripts", "e2e-gateway-check.py")
 
 # 看门狗在 12 秒触发，浏览器侧等 15 秒留出余量。
 BROWSER_WAIT_MS = 15000
+
+# seed_badges 需要往图标目录写文件，而图标目录在数据目录下、由 main() 创建。
+# 用一个模块级变量把路径传过去，避免给这个辅助函数再加一个参数。
+DATA_DIR_FOR_SEED = ""
 
 GREEN = "\033[32m"
 RED = "\033[31m"
@@ -86,6 +91,65 @@ def check(ok: bool, label: str, detail: str = "") -> bool:
     return ok
 
 
+def seed_badges(port: int, links: int, forwards: int, icons: int) -> bool:
+    """往一个空实例里造出若干链接 / 转发规则 / 图标。
+
+    为什么非造不可：徽标数字取的是**条目数**，而"0 项不显示徽标"是刻意的设计。
+    在空环境下，`nav-badge` 一个都不会出现 —— 于是任何"徽标该怎么显示"的断言
+    都会因为集合为空而空过（0 个徽标里没有不合格的），正是最没用的那种测试。
+    用户报的问题也只在有数据时才看得到。
+    """
+    import json  # noqa: F401
+    import urllib.error
+    import urllib.request
+
+    base = f"http://127.0.0.1:{port}"
+
+    def call(method: str, path: str, body=None):
+        payload = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(
+            base + path, data=payload, method=method,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                raw = resp.read().decode()
+                return resp.status, (json.loads(raw) if raw.strip() else None)
+        except urllib.error.HTTPError as exc:
+            return exc.code, None
+        except Exception:  # noqa: BLE001
+            return 0, None
+
+    ok = True
+    for i in range(links):
+        # kind 只认 local / proxy / shortcut（写成 local_port 会 400）
+        st, _ = call("POST", "/api/links", {
+            "name": f"e2e 示例 {i}", "kind": "local",
+            "host": "127.0.0.1", "port": 9001 + i,
+        })
+        ok = ok and st in (200, 201)
+    for i in range(forwards):
+        st, _ = call("POST", "/api/forwards", {
+            "name": f"e2e 转发 {i}", "protocol": "tcp", "listen_port": 19200 + i,
+            "target_host": "127.0.0.1", "target_port": 9, "enabled": False,
+        })
+        ok = ok and st in (200, 201)
+    # 图标走文件上传，多部件编码在这里不值得复刻；换个更直接的办法：
+    # 直接往图标目录写几个最小 PNG（接口是读目录的）。
+    if icons:
+        icons_dir = os.path.join(DATA_DIR_FOR_SEED, "icons") if DATA_DIR_FOR_SEED else ""
+        if icons_dir:
+            os.makedirs(icons_dir, exist_ok=True)
+            png = bytes.fromhex(
+                "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+                "1f15c4890000000a49444154789c6360000002000100fdff03fd000000"
+                "0049454e44ae426082")
+            for i in range(icons):
+                with open(os.path.join(icons_dir, f"e2e-icon-{i}.png"), "wb") as fh:
+                    fh.write(png)
+    return ok
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="QLink2Desktop 真浏览器启动期验证")
     parser.add_argument("--exe", default=".build/dev/qlink2desktop.exe", help="后端可执行文件路径")
@@ -109,6 +173,8 @@ def main() -> int:
 
     e2e = load_e2e_module()
     data_dir = tempfile.mkdtemp(prefix="qlink2d-browser-")
+    global DATA_DIR_FOR_SEED
+    DATA_DIR_FOR_SEED = data_dir
 
     print(f"{BOLD}QLink2Desktop 真浏览器启动期验证{RESET}")
     print(f"exe = {exe}\n期望 = {args.expect}\n")
@@ -132,6 +198,15 @@ def main() -> int:
         if not e2e.wait_backend(backend_port):
             print("!! 后端 20 秒内未就绪，放弃。", file=sys.stderr)
             return 2
+
+        # ---- 造数据：空环境下测不出"徽标要不要点击" ----------------------
+        # 本机全新数据目录里 0 个链接 / 0 条转发 / 0 个图标，而徽标对 0 是
+        # falsy（0 不显示徽标是刻意的）—— 于是"徽标一进页面就该有"这条断言
+        # 在空环境下会**因为集合为空而空过**。
+        # 用户报的问题恰恰只在有数据时出现，所以必须先把数据造出来。
+        seeded = seed_badges(backend_port, links=5, forwards=3, icons=3)
+        if seeded:
+            print(f"已造数据：链接 5 · 转发 3 · 图标 3（用于验证徽标）\n")
 
         gw = e2e.GatewaySimulator(backend_port, strip_prefix=True)
         gw.start()
@@ -215,6 +290,31 @@ def main() -> int:
                 failures += 1
             if not check(not snap["detailVisible"], "没有误报诊断信息", f"detail={snap['detailText']!r}"):
                 failures += 1
+            # ---- 第二段：窄屏 / 宽屏的导航可用性 ---------------------------
+            # "启动期正常"不等于"手机上能用"。窄屏的导航曾经因为一条
+            # `span:not(.nav-badge){display:none}` 整体消失（图标本身也是 span），
+            # 七个功能项变成看不见、点不准的空白按钮。这一段在整个链路里
+            # 原本查不出来：图标一直在 DOM 里，"元素存在"的断言看不见它。
+            print()
+            print(f"{BOLD}窄屏 / 宽屏导航可用性{RESET}")
+            mobile = subprocess.run(
+                [node, MOBILE_SCRIPT, url],
+                capture_output=True,
+                text=True,
+                env=node_env(),
+                timeout=240,
+            )
+            print(mobile.stdout.rstrip())
+            if mobile.stderr.strip():
+                print(mobile.stderr.rstrip(), file=sys.stderr)
+            tail = [ln for ln in mobile.stdout.splitlines() if "通过" in ln and "失败" in ln]
+            if not check(
+                mobile.returncode == 0,
+                "窄屏与宽屏下的导航都可用（逐条见上）",
+                tail[-1] if tail else "移动端验证脚本没有输出汇总行",
+            ):
+                failures += 1
+            print()
         else:
             if not check(snap["bootVisible"] and not snap["shellVisible"], "停在启动页（复刻故障场景）"):
                 failures += 1
