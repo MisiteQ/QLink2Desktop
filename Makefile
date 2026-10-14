@@ -29,13 +29,13 @@ EXE :=
 endif
 
 # 版本号唯一来源：仓库根目录的 VERSION 文件（手动维护，脚本只读不写）。
-VERSION ?= $(shell tr -d '[:space:]' < VERSION 2>/dev/null || echo 1.2.4)
+VERSION ?= $(shell tr -d '[:space:]' < VERSION 2>/dev/null || echo 1.2.6)
 
 ARCH ?= x86
 
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: all fpk fpk-all release build run test vet fmt icons clean check jscheck e2e browser-e2e verify
+.PHONY: all fpk fpk-all release build run test vet fmt icons clean check jscheck e2e browser-e2e verify reverse-verify reverse-verify-browser
 
 all: fpk
 
@@ -93,6 +93,17 @@ e2e: build
 # 这些只看服务端响应是看不出来的。
 browser-e2e: build
 	$(PYTHON) scripts/browser-e2e.py --exe ./$(APP_NAME)$(EXE) --expect ok
+
+# 反向验证：把每条守卫对应的事实改坏，确认它真的会 FAIL。
+#
+# 「通过」和「没在测」长得一模一样 —— 这个目标是唯一能把两者分开的手段。
+# 每加一条守卫就应当跑一次；不跑就等于默认它是形同虚设的。
+reverse-verify: build
+	$(PYTHON) scripts/reverse-verify.py
+
+# 真视口那一层单独验（每条都要重编译 + 起浏览器，慢得多）。
+reverse-verify-browser: build
+	$(PYTHON) scripts/reverse-verify.py --browser
 
 # 交付包复验：解开产物逐个核对版本号、架构、包结构，
 # 以及守卫 / 看门狗 / import 图自检是否真的进了包。

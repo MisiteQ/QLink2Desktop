@@ -206,6 +206,13 @@ export const api = {
       return request('POST', 'api/icons/upload', form);
     },
     remove: (name) => del(`api/icons/${encodeURIComponent(name)}`),
+    // 现场解析一次图标：返回来源、说明与一张可直接显示的预览图。
+    // 编辑器「自动」那一档靠它把「找没找到、从哪找到的」讲给用户听。
+    //
+    // 超时预算单独放宽：服务端这一档自带总预算（favicon 5 秒 + 官方图标库
+    // 6 秒），默认 15 秒虽然够用，但代理链路再叠一点延迟就会撞线，
+    // 而"看起来超时"和"没找到图标"在界面上完全是两回事，不能混。
+    resolve: (payload) => request('POST', 'api/icons/resolve', payload, { timeout: 30000 }),
     url: (name) => `icons/${encodeURIComponent(name)}`,
     defaultURL: (size = 256) => `icons/default-${size}.png`,
     portalURL: (size = 256, nonce = '') => `icons/portal-${size}.png${nonce ? `?v=${nonce}` : ''}`,

@@ -129,6 +129,32 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
+// decodeJSONLenient 与 decodeJSON 相同，但不拒绝未知字段。
+//
+// 用在「请求体是别人的 DTO」这种场景：图标解析接口要收的是**整条链接**的表单
+// 数据（前端图省事直接回传了 toPayload 的结果），而它自己只关心其中几个字段。
+// 这里若坚持严格解码，链接以后每加一个字段都会把这个接口打挂 —— 而报错是
+// 「unknown field」，和图标解析八竿子打不着，极难联想到真正的原因。
+//
+// 这不是假设：加上预览功能后第一次真机/浏览器验证就撞上了，报的是
+// `json: unknown field "desc"`，图标那一格直接静默退回默认图。
+//
+// 该严格的地方仍然严格：真正落库的写入接口（links / forwards / hosts）
+// 一律走 decodeJSON，拼错的字段名依旧会立刻暴露。
+func decodeJSONLenient(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if r.Body == nil {
+		writeError(w, fmt.Errorf("%w: 请求体为空", domain.ErrValidation))
+		return false
+	}
+	body := http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	dec := json.NewDecoder(body)
+	if err := dec.Decode(dst); err != nil {
+		writeError(w, fmt.Errorf("%w: 请求体解析失败: %v", domain.ErrValidation, err))
+		return false
+	}
+	return true
+}
+
 // pathValue 读取路径参数并去掉首尾空白。
 func pathValue(r *http.Request, name string) string {
 	return strings.TrimSpace(r.PathValue(name))

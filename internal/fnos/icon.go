@@ -4,6 +4,7 @@ import (
 	"bytes"
 	// 空导入 embed：只为 []byte 形式的 //go:embed 指令引入编译器支持，
 	// 不需要 embed.FS 类型本身。
+	"context"
 	_ "embed"
 	"encoding/base64"
 	"errors"
@@ -281,54 +282,144 @@ type IconRequest struct {
 	UploadDir string
 	// Candidates 是自动匹配官方图标时可用的关键词（镜像名、容器名、服务名、标题）。
 	Candidates []string
+	// SiteURL 是这条链接指向的站点地址（带 scheme）。官方图标库匹配不上时，
+	// 会拿它去要站点自己的 favicon —— 内网服务因此也能拿到自己的图标，
+	// 而这是公开图标库里永远不会有的一条。
+	SiteURL string
+	// SkipTLSVerify 让 favicon 抓取接受自签证书（内网服务的常态）。
+	SkipTLSVerify bool
 	// AllowRemote 控制是否允许发起外网请求（离线环境应关闭）。
 	AllowRemote bool
 }
 
+// IconSource 说明一枚图标最终是从哪一档拿到的。
+//
+// 这串值会原样出现在 API 响应里，前端据此决定显示什么文案。
+type IconSource string
+
+const (
+	// IconSourceUpload 用户上传的图片。
+	IconSourceUpload IconSource = "upload"
+	// IconSourceText 用文字渲染出来的。
+	IconSourceText IconSource = "text"
+	// IconSourceInline 内联的 data URI / 裸 base64。
+	IconSourceInline IconSource = "inline"
+	// IconSourceURL 用户直接填的远端图片地址。
+	IconSourceURL IconSource = "url"
+	// IconSourceOfficial 按关键词命中官方图标库。
+	IconSourceOfficial IconSource = "official"
+	// IconSourceFavicon 从目标站点自己那儿抓到的 favicon。
+	IconSourceFavicon IconSource = "favicon"
+	// IconSourceDefault 前面都没命中，落到内置默认图标。
+	IconSourceDefault IconSource = "default"
+)
+
+// IconResolution 是一次图标解析的完整结果：图标本身 **加上它是怎么来的**。
+//
+// 为什么非要把"怎么来的"也返回：图标解析是一条七档降级链，用户看到一张
+// 默认图标时，背后的原因可能是"还没去找""找过但站点没响应""离线模式不允许
+// 联网"这三种完全不同的情况。只回一枚图标，前端就只能显示一张图 ——
+// 用户看不出这里到底发生过什么，于是得到「这个图标功能没反应」的观感。
+// 把来源与失败原因一起回传，这条链才第一次对用户可见。
+type IconResolution struct {
+	IconSet
+
+	Source IconSource
+	// Detail 是一句给用户看的话：命中了什么关键词、问了哪个地址、为什么没找到。
+	Detail string
+	// Site 是本次去要 favicon 的站点地址（没走到那一档时为空）。
+	Site string
+	// Elapsed 是这次解析实际花掉的时间，用于向用户交代"确实去找过了"。
+	Elapsed time.Duration
+}
+
 // ResolveIcon 按优先级解析出最终图标：
 //
-//	上传文件 → data URI / 裸 base64 → 远端 URL → 文字渲染 → 官方图标自动匹配 → 内置默认图标
+//	上传文件 → 文字渲染 → data URI / 裸 base64 → 远端 URL
+//	→ 官方图标库自动匹配 → 站点自己的 favicon → 内置默认图标
+//
+// favicon 排在官方图标库**之后**：图标库那一套是人工挑选的，质量稳定；
+// favicon 是"退而求其次但仍然对得上"的一档，只在前面都没命中时才去问 ——
+// 这样既不用为每个链接都发一次站点请求，也不会拿一张 16×16 的
+// favicon 去顶掉一枚干净的官方图标。
 //
 // 任何一步失败都不会返回错误：图标永远能拿到，只是依次降级。
 // 这是刻意的设计——「桌面图标长得不对」远不如「整个安装失败」严重。
-func ResolveIcon(req IconRequest) IconSet {
+//
+// 只要图标不要来源时用这个；需要向用户解释过程时用 ResolveIconEx。
+func ResolveIcon(req IconRequest) IconSet { return ResolveIconEx(req).IconSet }
+
+// ResolveIconEx 是 ResolveIcon 的完整版，额外给出图标来源与失败原因。
+func ResolveIconEx(req IconRequest) IconResolution {
+	start := time.Now()
+	done := func(set IconSet, src IconSource, detail string) IconResolution {
+		return IconResolution{
+			IconSet: set, Source: src, Detail: detail,
+			Site: req.SiteURL, Elapsed: time.Since(start),
+		}
+	}
+
 	if img := loadFromUpload(req.Icon, req.UploadDir); img != nil {
 		if set, err := ToIconSet(img); err == nil {
-			return set
+			return done(set, IconSourceUpload, "使用你上传的图片")
 		}
 		slog.Warn("上传图标解析失败，继续降级", "ref", req.Icon.Ref)
 	}
 
 	if req.Icon.Source == domain.IconText {
 		if set, err := TextIconSet(req.Icon.Text, req.Icon.TextColor, req.Icon.BgColor); err == nil {
-			return set
+			return done(set, IconSourceText, "使用文字生成的图标")
 		}
 	}
 
 	if req.AllowRemote {
 		if img := loadFromInline(req.Icon.Ref); img != nil {
 			if set, err := ToIconSet(img); err == nil {
-				return set
+				return done(set, IconSourceInline, "使用内联的图标数据")
 			}
 		}
 		if img := loadFromURL(req.Icon.Ref); img != nil {
 			if set, err := ToIconSet(img); err == nil {
-				return set
+				return done(set, IconSourceURL, "已从你填写的网址下载图标")
 			}
 		}
-		if set, ok := matchOfficialIcon(req.Candidates); ok {
-			return set
+		if set, keyword, ok := matchOfficialIconKeyword(req.Candidates); ok {
+			return done(set, IconSourceOfficial,
+				fmt.Sprintf("命中官方图标库（关键词 %s）", keyword))
 		}
+		if set, detail, ok := siteFaviconLookup(req.SiteURL, req.SkipTLSVerify); ok {
+			return done(set, IconSourceFavicon, detail)
+		}
+		// 走到了这里说明"找过了但没找到"。把原因说清楚，别让用户以为没去找。
+		if req.Icon.Source == domain.IconText {
+			if set, err := TextIconSet(req.Icon.Text, req.Icon.TextColor, req.Icon.BgColor); err == nil {
+				return done(set, IconSourceText, "使用文字生成的图标")
+			}
+		}
+		return done(DefaultIconSet(), IconSourceDefault, faviconMissDetail(req.SiteURL))
 	}
 
 	// 文字图标即便在离线模式下也应生效，这里再兜一次。
 	if req.Icon.Source == domain.IconText {
 		if set, err := TextIconSet(req.Icon.Text, req.Icon.TextColor, req.Icon.BgColor); err == nil {
-			return set
+			return done(set, IconSourceText, "使用文字生成的图标")
 		}
 	}
 
-	return DefaultIconSet()
+	return done(DefaultIconSet(), IconSourceDefault,
+		"远端图标已关闭，未去站点查找；如需自动抓取请在设置里打开「允许远端图标」")
+}
+
+// faviconMissDetail 解释"为什么没抓到站点图标"。
+//
+// 空地址与有地址是两种完全不同的处境：前者是链接本身没有可问的地址
+// （比如反向代理还没填后端），后者是真的问了但对方没给。混成一句话
+// 会让人误以为程序没去试。
+func faviconMissDetail(siteURL string) string {
+	if strings.TrimSpace(siteURL) == "" {
+		return "这条链接没有可用于查找图标的站点地址，已使用内置默认图标"
+	}
+	return fmt.Sprintf("已访问 %s 但没找到图标（页面未声明，根目录也没有 favicon.ico），已使用内置默认图标", siteURL)
 }
 
 func loadFromUpload(icon domain.Icon, dir string) image.Image {
@@ -401,12 +492,38 @@ func loadFromURL(ref string) image.Image {
 	return decodeImage(data)
 }
 
+// officialIconBudget 是官方图标库这一档的**总**预算。
+//
+// 这一档的请求数是乘法关系：候选数 × 关键词数 × 4 个 CDN 节点，一个都答不上
+// 时最坏能有几十次请求。而 httpClient 的单次超时是 8 秒 —— 也就是说在这条
+// 「用户正等着看图标」的路径上，最坏能挂好几分钟。真实场景就是这个：国内
+// 网络访问 jsDelivr 经常整体不通，于是每一次候选都完整地等满超时。
+//
+// 卡总预算后行为变得可预期：最长等这么久，然后老老实实交给 favicon 那一档
+// （对内网服务来说，那一档才是真正能命中的）。
+const officialIconBudget = 6 * time.Second
+
 // matchOfficialIcon 用候选关键词到图标镜像库自动匹配官方图标。
+// 不需要知道命中哪个关键词时用它；要写给用户看的说明时用 ...Keyword 版本。
 func matchOfficialIcon(candidates []string) (IconSet, bool) {
+	set, _, ok := matchOfficialIconKeyword(candidates)
+	return set, ok
+}
+
+// matchOfficialIconKeyword 额外返回命中的关键词，便于把结果讲给用户听。
+func matchOfficialIconKeyword(candidates []string) (IconSet, string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), officialIconBudget)
+	defer cancel()
+
 	for _, raw := range candidates {
 		for _, name := range iconKeywords(raw) {
 			for _, tpl := range cdnTemplates {
-				data, err := fetchBytes(fmt.Sprintf(tpl, name))
+				// 预算用尽就收工：剩下的候选只会在同一条不通的路上继续等。
+				if ctx.Err() != nil {
+					slog.Debug("官方图标库匹配超出总预算，转到下一档")
+					return IconSet{}, "", false
+				}
+				data, err := fetchBytesCtx(ctx, fmt.Sprintf(tpl, name))
 				if err != nil {
 					continue
 				}
@@ -419,11 +536,11 @@ func matchOfficialIcon(candidates []string) (IconSet, bool) {
 					continue
 				}
 				slog.Info("自动匹配到官方服务图标", "keyword", name)
-				return set, true
+				return set, name, true
 			}
 		}
 	}
-	return IconSet{}, false
+	return IconSet{}, "", false
 }
 
 // iconKeywords 从一个原始名称里抽出可用于检索图标的候选关键词，按「越具体越靠前」排序。
@@ -479,7 +596,17 @@ func iconKeywords(raw string) []string {
 }
 
 func fetchBytes(url string) ([]byte, error) {
-	resp, err := httpClient.Get(url)
+	return fetchBytesCtx(context.Background(), url)
+}
+
+// fetchBytesCtx 的 ctx 让调用方能给**一整批**请求卡总预算，
+// 而不是让每个请求各自等满自己的超时再叠加起来。
+func fetchBytesCtx(ctx context.Context, url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

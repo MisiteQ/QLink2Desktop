@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MisiteQ/qlink2desktop/internal/auth"
@@ -117,6 +118,21 @@ type Server struct {
 	mux       *http.ServeMux
 	startedAt time.Time
 	limiter   *loginLimiter
+
+	// 自动图标解析的进行中标记与结果备忘。
+	//
+	// 两者都只活在内存里：它们是**过程**信息，不是配置。
+	// 重启后第一条列表请求会把它们自然重建（见 withAutoIcons）。
+	autoIconWarmingMu sync.Mutex
+	autoIconWarming   map[string]bool
+	autoIconMemoMu    sync.Mutex
+	autoIconMemo      map[string]autoIconNote
+}
+
+// autoIconNote 是一条链接最近一次自动解析的结果摘要，用于在界面上解释图标。
+type autoIconNote struct {
+	source string
+	detail string
 }
 
 // New 构造 Server 并注册全部路由。
@@ -238,6 +254,8 @@ func (s *Server) routes() {
 
 	api.HandleFunc("GET /api/icons", s.handleListIcons)
 	api.HandleFunc("POST /api/icons/upload", s.handleUploadIcon)
+	// 现场解析一次图标（编辑器里「自动」那一档的状态反馈）。
+	api.HandleFunc("POST /api/icons/resolve", s.handleResolveIcon)
 	api.HandleFunc("DELETE /api/icons/{name}", s.handleDeleteIcon)
 
 	api.HandleFunc("GET /api/tools/port", s.handlePickPort)
@@ -308,17 +326,96 @@ func (s *Server) snapshot() snapshot {
 
 // views 返回全部链接视图；无 Coordinator 时降级为「仅定义、状态未知」。
 func (s *Server) views() []domain.View {
+	var out []domain.View
 	if s.deps.Coordinator != nil {
-		return s.deps.Coordinator.Views()
+		out = s.deps.Coordinator.Views()
+	} else {
+		links := s.deps.Store.ListLinks()
+		out = make([]domain.View, 0, len(links))
+		for _, l := range links {
+			out = append(out, domain.NewView(l, domain.Status{
+				Phase: domain.PhaseUnknown,
+			}))
+		}
 	}
-	links := s.deps.Store.ListLinks()
-	out := make([]domain.View, 0, len(links))
-	for _, l := range links {
-		out = append(out, domain.NewView(l, domain.Status{
-			Phase: domain.PhaseUnknown,
-		}))
+	return s.withAutoIcons(out)
+}
+
+// withAutoIcons 为「自动」档链接补上实际解析出的图标文件名。
+//
+// 顺带在后台把还没解析过的链接解析一遍 —— 这是**惰性预热**，不是副作用失控：
+// 列表被请求本身就说明用户在等图标，而解析要读网络（有总预算），
+// 不能压在这一次响应里。解析结果若真的改变了磁盘上的文件，
+// 就广播一次 links 事件让前端重拉；重复调用因为有输入签名去重，不会形成循环。
+//
+// 刻意不复制整个切片再改写：Coordinator.Views() 每次调用都新建切片，
+// 而这里要写的 IconAuto 是纯派生字段，不影响任何既有语义。
+func (s *Server) withAutoIcons(views []domain.View) []domain.View {
+	if s.deps.Service == nil {
+		return views
 	}
-	return out
+	s.autoIconMemoMu.Lock()
+	defer s.autoIconMemoMu.Unlock()
+
+	for i := range views {
+		l := views[i].Link
+		if l.Icon.Source != domain.IconAuto {
+			continue
+		}
+		views[i].IconAuto = s.deps.Service.AutoIconFile(l)
+		// 把上一次解析的结论一并带上：列表里那张缩略图背后的故事
+		// （命中了官方库 / 从站点抓到了 / 找了但对方没有）就挂在这上面，
+		// 用户把鼠标移上去就能看到，不必再进编辑器。
+		if note, ok := s.autoIconMemo[l.ID]; ok {
+			views[i].IconAutoNote = note.detail
+			views[i].IconAutoSource = note.source
+		}
+		s.warmAutoIcon(l)
+	}
+	return views
+}
+
+// warmAutoIcon 在后台解析一条链接的图标。
+//
+// 不放在请求路径上：favicon 5 秒 + 官方图标库 6 秒，全压在首屏列表里
+// 会让面板直接变成"打不开"。列表先渲染，图标随后自己长出来。
+func (s *Server) warmAutoIcon(l domain.Link) {
+	key := l.ID
+	s.autoIconWarmingMu.Lock()
+	if s.autoIconWarming == nil {
+		s.autoIconWarming = map[string]bool{}
+	}
+	if s.autoIconWarming[key] {
+		s.autoIconWarmingMu.Unlock()
+		return
+	}
+	s.autoIconWarming[key] = true
+	s.autoIconWarmingMu.Unlock()
+
+	go func() {
+		defer func() {
+			s.autoIconWarmingMu.Lock()
+			delete(s.autoIconWarming, key)
+			s.autoIconWarmingMu.Unlock()
+		}()
+		changed, res := s.deps.Service.EnsureAutoIcon(l)
+		if res.Detail == "" {
+			return
+		}
+		s.autoIconMemoMu.Lock()
+		if s.autoIconMemo == nil {
+			s.autoIconMemo = map[string]autoIconNote{}
+		}
+		s.autoIconMemo[l.ID] = autoIconNote{source: string(res.Source), detail: res.Detail}
+		s.autoIconMemoMu.Unlock()
+
+		s.deps.Logger.Debug("自动图标解析结果",
+			"link", l.ID, "source", string(res.Source), "detail", res.Detail)
+		// 文件真的变了才广播 —— 否则列表会因为「解析了但结果相同」反复重拉。
+		if changed {
+			s.broadcast(EventLinksChanged, nil)
+		}
+	}()
 }
 
 // ---------------------------------------------------------------------------

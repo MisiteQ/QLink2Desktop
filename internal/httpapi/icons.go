@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -74,6 +75,11 @@ func (s *Server) listIcons() ([]iconItem, error) {
 	items := make([]iconItem, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".png") {
+			continue
+		}
+		// 自动解析出来的图标是同目录下的程序产物（见 fnos.autoIconPrefix）。
+		// 它们不该混进「我的图标」：用户既没有上传过，删掉了也会被重新生成。
+		if fnos.IsAutoIconFile(e.Name()) {
 			continue
 		}
 		info, err := e.Info()
@@ -260,6 +266,108 @@ func readLimited(r io.Reader, limit int64) ([]byte, error) {
 		return nil, fmt.Errorf("%w: 上传内容为空", domain.ErrValidation)
 	}
 	return data, nil
+}
+
+// ---------------------------------------------------------------------------
+// 解析预览
+// ---------------------------------------------------------------------------
+
+// resolveIconRequest 是「先看看这条链接会长成什么图标」的请求体。
+//
+// 刻意与 linkRequest 分开而不是复用它：编辑器里用户常常还没填完就想看看
+// 图标长什么样，这时链接是不完整的（没有名字、地址可能只填了一半）。
+// 复用 linkRequest 会被 Validate 挡回来，而这里本来就该宽容 ——
+// 解析图标只需要地址与候选关键词，别的字段一概不参与。
+type resolveIconRequest struct {
+	Kind      string            `json:"kind,omitempty"`
+	Scheme    string            `json:"scheme,omitempty"`
+	Host      string            `json:"host,omitempty"`
+	Port      int               `json:"port,omitempty"`
+	Path      string            `json:"path,omitempty"`
+	Name      string            `json:"name,omitempty"`
+	ID        string            `json:"id,omitempty"`
+	Icon      *domain.Icon      `json:"icon,omitempty"`
+	Container *domain.Container `json:"container,omitempty"`
+
+	SkipTLSVerify bool `json:"skip_tls_verify,omitempty"`
+}
+
+// toDomain 把请求体拼成一条可用于解析的链接（不落库、不校验完整性）。
+func (req resolveIconRequest) toDomain() domain.Link {
+	kind, err := domain.ParseKind(req.Kind)
+	if err != nil {
+		kind = domain.KindLocalPort
+	}
+	l := domain.Link{
+		ID: req.ID, Name: strings.TrimSpace(req.Name), Kind: kind,
+		Scheme: req.Scheme, Host: req.Host, Port: req.Port, Path: req.Path,
+		SkipTLSVerify: req.SkipTLSVerify,
+	}
+	if req.Icon != nil {
+		l.Icon = *req.Icon
+	}
+	if req.Container != nil {
+		l.Container = *req.Container
+	}
+	l.Normalize()
+	return l
+}
+
+// handleResolveIcon 现场解析一次图标，把「找没找到」与「从哪找到的」一起回给前端。
+//
+// 这是把图标解析这条降级链**第一次暴露给用户**的地方。在此之前，解析只发生在
+// 打包那一刻，结果只写进桌面包，面板上没有任何回音 —— 用户看到一张默认图标时
+// 分不清"正在找""找了没找到""根本没找"。
+//
+// 同步返回而不是做成后台任务：这一档本来就有总预算（favicon 5 秒、官方图标库
+// 6 秒），前端配一个「正在查找…」的转圈恰好覆盖这段时间。做成异步反而要多一套
+// 任务轮询，而用户等待的绝对时间一点没少。
+func (s *Server) handleResolveIcon(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Service == nil {
+		writeError(w, fmt.Errorf("图标解析当前不可用"))
+		return
+	}
+
+	// 宽松解码：前端传的是整条链接的表单数据，这里只用得上其中几个字段。
+	// 用严格解码的话，链接以后每加一个字段都会把这个预览打挂（见 decodeJSONLenient）。
+	var req resolveIconRequest
+	if !decodeJSONLenient(w, r, &req) {
+		return
+	}
+
+	res := s.deps.Service.ResolveLinkIcon(req.toDomain())
+
+	body := map[string]any{
+		"source":     string(res.Source),
+		"detail":     res.Detail,
+		"site":       res.Site,
+		"elapsed_ms": res.Elapsed.Milliseconds(),
+		"message":    iconSourceMessage(res.Source),
+	}
+	if len(res.Large) > 0 {
+		body["preview"] = "data:image/png;base64," + base64.StdEncoding.EncodeToString(res.Large)
+	}
+	ok(w, body)
+}
+
+// iconSourceMessage 给每一档配一句短标题，前端直接显示，不必自己维护映射表。
+func iconSourceMessage(src fnos.IconSource) string {
+	switch src {
+	case fnos.IconSourceUpload:
+		return "使用你上传的图片"
+	case fnos.IconSourceText:
+		return "使用文字图标"
+	case fnos.IconSourceInline:
+		return "使用内联的图标数据"
+	case fnos.IconSourceURL:
+		return "已从你填写的网址下载图标"
+	case fnos.IconSourceOfficial:
+		return "已匹配到官方图标库"
+	case fnos.IconSourceFavicon:
+		return "已从站点抓取到图标"
+	default:
+		return "未找到图标，将使用内置默认图标"
+	}
 }
 
 func (s *Server) handleDeleteIcon(w http.ResponseWriter, r *http.Request) {

@@ -258,12 +258,8 @@ svg { display: block; }
   box-shadow: inset 3px 0 0 var(--accent-solid);
 }
 .nav-item .nav-icon { flex: 0 0 18px; }
-.nav-item .nav-badge {
-  margin-left: auto; font-size: .7rem; font-weight: 600;
-  padding: 1px 6px; border-radius: 99px;
-  background: var(--bg-sunken); color: var(--text-muted);
-}
-.nav-item.active .nav-badge { background: var(--accent-solid); color: var(--accent-on); }
+/* 侧边栏不放计数徽标 —— 用户明确要求去掉那一排数字和圆圈。
+   计数在各页面自己身上（列表标题、筛选器），导航只负责"去哪一页"。 */
 
 .sidebar-foot {
   display: flex; flex-direction: column; gap: 4px;
@@ -444,6 +440,9 @@ table.tbl td.actions { text-align: right; white-space: nowrap; }
 .tag.warn { background: var(--warn-soft); color: var(--warn); }
 .tag.danger { background: var(--danger-soft); color: var(--danger); }
 .tag.mono { font-family: var(--mono); font-weight: 500; }
+/* 「正在查找」用的进行中标记：与成功 / 失败同形同尺寸，只换配色 ——
+   三者会原地互相替换，尺寸若不同会让这一行在查找过程中跳动。 */
+.tag.busy { background: var(--accent-soft); color: var(--accent); }
 
 /* 表单 */
 
@@ -454,6 +453,13 @@ table.tbl td.actions { text-align: right; white-space: nowrap; }
    拉满整行 —— 按钮仍挤在左边，背景却铺了一整条，看着像坏了。
    让它按自身宽度收起来。 */
 .field > .segmented { align-self: flex-start; }
+
+/* 图标解析状态行：状态标签 + 一句说明，窄屏自动折行。
+   .icon-status 自己承担「有没有内容」的可见性 —— 空的时候整个收掉，
+   免得在图标框旁边留一条莫名其妙的空白。 */
+.icon-status { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.icon-status:empty { display: none; }
+.icon-status-detail { font-size: .76rem; }
 
 input[type=text], input[type=number], input[type=password], input[type=search],
 select, textarea {
@@ -742,7 +748,7 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
    系统状态栏，窄屏的顶部空间已经被吃掉两行，而底部是拇指最容易够到的位置。
 
    这里修的是一个真实故障（用户："手机模式下侧边栏没有了，不能切换功能区"）。
-   旧规则是 `.nav-item span:not(.nav-badge) { display: none }` —— 本意"只留图标"，
+   旧规则按标签名排除某一个 class 来"只留图标"（`span:not(…)`），
    但**图标本身也是 span**，于是图标与文字一起被隐藏，七个功能项统统变成
    看不见、仅 37×14px 的空白按钮：点不准，也不知道哪个是哪个。
    教训：`元素类型 + :not(某 class)` 会把同类兄弟节点一并命中。
@@ -787,13 +793,11 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
   /* 应用名由飞牛的标题栏显示，窄屏再占一行是浪费 */
   .brand { display: none; }
 
-  /* 每个按钮等分宽度：宽度固定成内容大小时，七项加起来会溢出容器，
-     于是状态点被挤出屏幕外（用户截图里那两个点就顶在最右边）。
+  /* 每个按钮等分宽度：宽度固定成内容大小时，七项加起来会溢出容器。
      flex:1 + min-width:0 让它们均匀铺满、且不会因文字长度互相挤压。 */
   .nav { flex: 1 1 auto; flex-direction: row; gap: 0; min-width: 0; }
 
   .nav-item {
-    position: relative;
     flex: 1 1 0; min-width: 0;
     flex-direction: column; justify-content: center; align-items: center;
     gap: 4px;
@@ -828,32 +832,12 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
   }
   .nav-item.active .nav-icon { color: var(--accent); }
 
-  /* 徽标浮在图标右上角：纵向布局里它会把有徽标的那一项撑得比邻居高。
-     图标居中、徽标相对它定位，所以这里按图标中心算左右偏移，而不是贴到按钮边。 */
-  .nav-item .nav-badge {
-    position: absolute;
-    top: 2px; left: calc(50% + 5px); right: auto;
-    margin: 0; padding: 0 5px;
-    font-size: .5625rem; font-weight: 700; line-height: 16px;
-    min-width: 16px; height: 16px; box-sizing: border-box;
-    border-radius: 99px;
-    /* 描边同底色，徽标压在图标上时仍能读出边界 */
-    box-shadow: 0 0 0 2px var(--bg-elevated);
-    background: var(--accent-solid); color: var(--accent-on);
-    pointer-events: none;
-  }
-
-  /* 状态点：不再是"挤在最右的边缘装饰"，而是收成一个独立小格。
-     margin-left:auto 在等分布局里仍把它顶到末尾，但留出了与最后一项的间距。 */
-  .sidebar-foot {
-    flex: 0 0 auto; flex-direction: row; align-items: center;
-    gap: 2px; margin-left: 4px;
-    padding: 0 2px 0 8px; border-top: 0;
-    border-left: 1px solid var(--border);
-  }
-  .pip { padding: 4px; }
-  .pip .dot { width: 6px; height: 6px; flex: 0 0 6px; }
-  .pip-text { display: none; }
+  /* 状态点整体撤掉，不留一格。
+     窄屏里 .pip-text 本来是隐藏的，于是那两个点退化成一枚没有任何文字的
+     绿色圆点 —— 用户的原话是"除了占空间没有其他的用处"。没有文字的指示灯
+     等于没有信息：既看不出它代表什么，也看不出状态变了没有。
+     它在宽屏仍然保留（那里有文字说明），窄屏直接不显示。 */
+  .sidebar-foot { display: none; }
 
   /* 底部条是 fixed 的、不占文档流 —— 内容区必须自己留出它的高度（同一个
      --navbar-h 再加一点余量），否则最后一张卡片永远被压在栏下面。 */
@@ -870,8 +854,4 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
   .nav-item { gap: 3px; padding: 5px 1px; border-radius: 10px; font-size: .5625rem; }
   .nav-item .nav-icon { height: 20px; }
   .nav-item .nav-icon svg { width: 20px; height: 20px; }
-  .nav-item .nav-badge {
-    top: 1px; left: calc(50% + 4px);
-    font-size: .5rem; line-height: 15px; min-width: 15px; height: 15px; padding: 0 4px;
-  }
 }

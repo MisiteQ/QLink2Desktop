@@ -225,6 +225,12 @@ func (s *Server) handleUpdateLink(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteLink(w http.ResponseWriter, r *http.Request) {
 	id := pathValue(r, "id")
 
+	// 顺手把自动解析出来的图标也删掉。它是由这条链接派生出来的文件，
+	// 链接没了它就永远没人再引用 —— 留着只会在图标目录里慢慢堆垃圾。
+	if l, found := s.deps.Store.GetLink(id); found && s.deps.Service != nil {
+		s.deps.Service.RemoveAutoIcon(l)
+	}
+
 	if s.deps.Coordinator != nil {
 		deleted, err := s.deps.Coordinator.QueueRemove(id)
 		if err != nil {

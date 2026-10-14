@@ -157,7 +157,10 @@ function row(view) {
     h('td', {}, [
       h('div', { class: 'cell-main' }, [
         h('img', {
-          class: 'thumb', src: thumbSrc(link), alt: '',
+          class: 'thumb', src: thumbSrc(view), alt: '',
+          // 悬停时把「这枚图标是怎么来的」讲出来：命中了官方图标库、
+          // 从站点 favicon 抓到的、还是找了但对方没有。
+          title: view.icon_auto_note || '',
           onerror: (e) => { e.currentTarget.src = api.icons.defaultURL(64); },
         }),
         h('div', { class: 'grow' }, [
@@ -245,10 +248,17 @@ function row(view) {
 
 /* ------------------------------------------------------------------ 行为 */
 
-function thumbSrc(link) {
+// thumbSrc 给出列表里那张缩略图该显示什么。
+//
+// 「自动」那一档以前直接落到内置默认图 —— 于是**已经自动抓到图标**和
+// **什么都没抓到**在列表里长得一模一样，用户只能得出「图标功能没反应」。
+// 现在 view.icon_auto 带回后端实际解析出的文件名，有就显示它。
+function thumbSrc(view) {
+  const link = view.link || view;
   const ic = link.icon || {};
   if (ic.source === 'url' && ic.ref) return ic.ref;
   if (ic.source === 'upload' && ic.ref) return api.icons.url(ic.ref);
+  if (view.icon_auto) return api.icons.url(view.icon_auto);
   return api.icons.defaultURL(64);
 }
 

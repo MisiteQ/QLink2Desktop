@@ -59,6 +59,25 @@ type Status struct {
 type View struct {
 	Link   Link   `json:"link"`
 	Status Status `json:"status"`
+
+	// IconAuto 是「自动」档实际解析出来的图标文件名（图标目录下的相对名），
+	// 没有则为空串。
+	//
+	// 为什么要有这个字段：Link.Icon 只记录了**用户的意图**（"交给系统自动
+	// 匹配"），不记录系统最后匹配到了什么。少了这一项，列表就无从显示真实
+	// 图标，只能一律画内置默认图 —— 于是"已经自动抓到图标"和"什么都没抓到"
+	// 在界面上长得一模一样，用户得到的结论是"这个图标功能没反应"。
+	//
+	// 它由调用方在组装视图时填充（要读文件系统，属于运行态而非定义）。
+	IconAuto string `json:"icon_auto,omitempty"`
+
+	// IconAutoSource / IconAutoNote 是「自动」这一档最近一次解析的结论，
+	// 用来在列表里解释这张图标是怎么来的（或为什么没来）。
+	//
+	// 两者都只是过程信息，重启后的第一条列表请求会重新解析并覆盖它们，
+	// 因此不参与持久化，也不该被前端当作可靠状态来依赖。
+	IconAutoSource string `json:"icon_auto_source,omitempty"`
+	IconAutoNote   string `json:"icon_auto_note,omitempty"`
 }
 
 // NewView 组装一个视图，自动补齐 LinkID / AppName 字段。

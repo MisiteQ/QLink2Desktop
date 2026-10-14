@@ -54,6 +54,12 @@ export function openLinkEditor(existing = null, preset = {}) {
       const root = h('div', { class: 'grid' });
       root.style.gap = '16px';
 
+      // 「目标地址变了，图标要重查」的挂钩。
+      //
+      // 形态那一堆字段在图标卡片之前就建好了，只能靠这个可变引用回填 ——
+      // 图标卡建好之前用户不可能去敲地址，所以默认空实现是安全的。
+      let onTargetChange = () => {};
+
       /* ---------------------------------------------------- 基本信息 */
       const nameInput = h('input', {
         type: 'text', value: model.name, placeholder: '显示在飞牛桌面上的名称',
@@ -76,6 +82,9 @@ export function openLinkEditor(existing = null, preset = {}) {
       })), model.kind, (value) => {
         model.kind = value;
         buildKindSection();
+        // 换形态等于换地址（本机端口问回环、端口映射问后端、快捷方式问目标网址），
+        // 自动图标必须跟着重查，否则会一直挂着上一个形态的结果。
+        onTargetChange();
       });
 
       append(root, h('div', { class: 'field' }, [
@@ -97,7 +106,7 @@ export function openLinkEditor(existing = null, preset = {}) {
           append(kindBox, h('div', { class: 'form-grid' }, [
             field('完整网址 *', h('input', {
               type: 'text', value: model.path, placeholder: 'https://example.com/',
-              oninput: (e) => { model.path = e.target.value; },
+              oninput: (e) => { model.path = e.target.value; onTargetChange(); },
             }), '不带 http:// 时会自动按 https 处理'),
             field('图标文件名类型', fileTypesInput(model), '可选，用于桌面「打开方式」的关联'),
           ]));
@@ -114,11 +123,11 @@ export function openLinkEditor(existing = null, preset = {}) {
         const portInput = h('input', {
           type: 'number', min: '1', max: '65535', value: model.port || '',
           placeholder: '例如 8080',
-          oninput: (e) => { model.port = Number(e.target.value) || 0; },
+          oninput: (e) => { model.port = Number(e.target.value) || 0; onTargetChange(); },
         });
         const pathInput = h('input', {
           type: 'text', value: model.path, placeholder: '/',
-          oninput: (e) => { model.path = e.target.value; },
+          oninput: (e) => { model.path = e.target.value; onTargetChange(); },
         });
 
         const rows = [];
@@ -127,7 +136,7 @@ export function openLinkEditor(existing = null, preset = {}) {
           rows.push(field('目标主机 *', h('input', {
             type: 'text', value: model.host,
             placeholder: '192.168.1.10 或 nas.example.com',
-            oninput: (e) => { model.host = e.target.value; },
+            oninput: (e) => { model.host = e.target.value; onTargetChange(); },
           }), '填已保存的远端主机名可自动走 SSH 隧道'));
         } else {
           rows.push(field('目标主机', h('input', {
@@ -145,6 +154,7 @@ export function openLinkEditor(existing = null, preset = {}) {
                   const res = await api.tools.pickPort();
                   model.port = res.port;
                   portInput.value = String(res.port);
+                  onTargetChange();
                   notify.ok(`已选空闲端口 ${res.port}`);
                 } catch (err) {
                   notify.error(err.message);
@@ -157,6 +167,7 @@ export function openLinkEditor(existing = null, preset = {}) {
             onclick: (e) => withBusy(e.currentTarget, () => openPortPicker((port) => {
               model.port = port;
               portInput.value = String(port);
+              onTargetChange();
             })),
           }, ['从列表选择']),
         ])));
@@ -164,7 +175,7 @@ export function openLinkEditor(existing = null, preset = {}) {
         rows.push(field('协议', segmented([
           { value: 'http', label: 'HTTP' },
           { value: 'https', label: 'HTTPS' },
-        ], model.scheme, (v) => { model.scheme = v; })));
+        ], model.scheme, (v) => { model.scheme = v; onTargetChange(); })));
 
         rows.push(field('访问路径', pathInput));
 
@@ -173,7 +184,7 @@ export function openLinkEditor(existing = null, preset = {}) {
         if (model.kind === 'proxy') {
           append(kindBox, h('div', { class: 'row mt-3' }, [
             h('label', { class: 'check' }, [
-              checkbox(model.skip_tls_verify, (v) => { model.skip_tls_verify = v; }),
+              checkbox(model.skip_tls_verify, (v) => { model.skip_tls_verify = v; onTargetChange(); }),
               h('span', { class: 'check-body' }, [
                 h('span', { text: '忽略后端证书校验' }),
                 h('span', { class: 'hint', text: '后端使用自签证书时开启' }),
@@ -247,7 +258,9 @@ export function openLinkEditor(existing = null, preset = {}) {
       ]));
 
       /* -------------------------------------------------------- 图标 */
-      append(root, buildIconSection(model));
+      const iconSection = buildIconSection(model);
+      append(root, iconSection.node);
+      onTargetChange = iconSection.retarget;
 
       return root;
     },
@@ -381,15 +394,13 @@ function buildURL(model) {
 }
 
 function buildIconSection(model) {
-  const preview = h('img', {
-    src: iconPreviewSrc(model.icon),
-    alt: '图标预览',
-    style: {
-      width: '64px', height: '64px', borderRadius: '14px',
-      objectFit: 'cover', border: '1px solid var(--border)', background: 'var(--bg-sunken)',
-    },
-  });
+  const previewStyle = {
+    width: '64px', height: '64px', borderRadius: '14px',
+    objectFit: 'cover', border: '1px solid var(--border)', background: 'var(--bg-sunken)',
+  };
+  const preview = h('img', { src: iconPreviewSrc(model.icon), alt: '图标预览', style: previewStyle });
   const fields = h('div', { class: 'grow' });
+  const previewRef = { node: preview };
 
   const refreshPreview = () => {
     if (model.icon.source === 'text') {
@@ -404,22 +415,76 @@ function buildIconSection(model) {
         },
         text: (model.icon.text || 'QL').slice(0, 4).toUpperCase(),
       });
-      replace(preview.parentNode, [wrap, fields]);
+      replace(previewRef.node.parentNode, [wrap, fields]);
       previewRef.node = wrap;
     } else {
-      const img = h('img', {
-        src: iconPreviewSrc(model.icon), alt: '图标预览',
-        style: {
-          width: '64px', height: '64px', borderRadius: '14px',
-          objectFit: 'cover', border: '1px solid var(--border)', background: 'var(--bg-sunken)',
-        },
-      });
+      const img = h('img', { src: iconPreviewSrc(model.icon), alt: '图标预览', style: previewStyle });
       replace(previewRef.node.parentNode, [img, fields]);
       previewRef.node = img;
     }
   };
-  const previewRef = { node: preview };
 
+  /* ------------------------------------------------------ 「自动」档查找 */
+  //
+  // 这一档以前是**完全静默**的：图标框里永远画着内置默认图，用户既看不出
+  // 「正在找」也分不清「找过了没找到」和「根本没去找」—— 得到的结论是
+  // 「图标功能没反应」。下面这段就是把这条降级链摆到台面上：
+  // 转圈 → 结果标签 + 一句说明（命中了哪个关键词 / 从哪个地址抓到的 /
+  // 为什么没找到），外加一个「重新查找」按钮。
+  const statusBox = h('div', { class: 'icon-status' });
+  let autoToken = 0;
+  let autoTimer = null;
+
+  const setStatus = (nodes) => { clear(statusBox); append(statusBox, nodes); };
+
+  const renderSearching = () => setStatus([
+    h('span', { class: 'tag busy' }, [h('span', { class: 'spinner-sm' }), '正在查找图标…']),
+  ]);
+
+  const renderResult = (res) => {
+    const ok = res.source && res.source !== 'default';
+    setStatus([
+      h('span', { class: `tag ${ok ? 'ok' : 'warn'}` }, [
+        icon(ok ? 'check' : 'alert', 13),
+        res.message || (ok ? '已找到图标' : '未找到图标'),
+      ]),
+      h('span', { class: 'muted icon-status-detail', text: res.detail || '' }),
+      res.elapsed_ms != null
+        ? h('span', { class: 'muted nowrap', text: `（用时 ${(res.elapsed_ms / 1000).toFixed(1)} 秒）` })
+        : null,
+    ].filter(Boolean));
+  };
+
+  const renderFailed = (err) => setStatus([
+    h('span', { class: 'tag danger' }, ['查找失败']),
+    h('span', { class: 'muted icon-status-detail', text: err.message }),
+  ]);
+
+  const lookupAuto = async () => {
+    const token = ++autoToken;
+    renderSearching();
+    try {
+      const res = await api.icons.resolve(toPayload(model));
+      if (token !== autoToken) return; // 期间又改了地址，这次结果已经过期
+      if (res.preview && previewRef.node && previewRef.node.tagName === 'IMG') {
+        previewRef.node.src = res.preview;
+      }
+      renderResult(res);
+    } catch (err) {
+      if (token !== autoToken) return;
+      renderFailed(err);
+    }
+  };
+
+  // 目标地址一改就重新查找，但打字期间不能每敲一个键就发一次请求。
+  // 防抖 + 令牌双重保险：前者省请求，后者保证迟到的结果不会覆盖新结果。
+  const scheduleLookup = () => {
+    if (model.icon.source) return;
+    if (autoTimer) clearTimeout(autoTimer);
+    autoTimer = setTimeout(lookupAuto, 700);
+  };
+
+  /* ------------------------------------------------------------ 重建 */
   const rebuild = () => {
     clear(fields);
     const src = model.icon.source;
@@ -460,7 +525,20 @@ function buildIconSection(model) {
         model.icon.ref ? field('已选文件', h('div', { class: 'mono truncate', text: model.icon.ref })) : null,
       ]));
     } else {
-      append(fields, h('p', { class: 'muted', text: '将由系统根据容器镜像名自动匹配官方图标；匹配不到时使用内置默认图标。' }));
+      append(fields, h('div', { class: 'field' }, [
+        h('div', { class: 'row', style: { gap: '8px', alignItems: 'center', flexWrap: 'wrap' } }, [
+          h('button', {
+            class: 'btn sm accent nowrap', type: 'button',
+            onclick: () => lookupAuto(),
+          }, [icon('refresh', 14), '重新查找']),
+          statusBox,
+        ]),
+        h('span', { class: 'hint', text:
+          '先按容器镜像名匹配官方图标；匹配不到时，再拿这条链接的地址去抓站点自己的 ' +
+          'favicon（先看页面声明、再试根目录的 /favicon.ico）；两者都没有才用内置默认图标。' }),
+      ]));
+      // 一进这个档就查一次：用户切过来就是想看"能不能自动找到"。
+      void lookupAuto();
     }
   };
 
@@ -471,21 +549,29 @@ function buildIconSection(model) {
     { value: 'upload', label: '上传' },
   ], model.icon.source || '', (v) => {
     model.icon.source = v;
+    // 离开「自动」档要把在途请求的令牌推进一格，否则它回来时
+    // 会往已经换掉的界面里写状态。
+    autoToken++;
+    if (autoTimer) clearTimeout(autoTimer);
     rebuild();
     refreshPreview();
   });
 
   rebuild();
 
-  return h('div', { class: 'card' }, [
-    h('div', { class: 'card-head' }, [
-      h('h2', { text: '图标' }),
-      h('div', { class: 'row' }, [seg]),
+  return {
+    node: h('div', { class: 'card' }, [
+      h('div', { class: 'card-head' }, [
+        h('h2', { text: '图标' }),
+        h('div', { class: 'row' }, [seg]),
+      ]),
+      h('div', { class: 'card-body' }, [
+        h('div', { class: 'row', style: { alignItems: 'flex-start', gap: '16px' } }, [preview, fields]),
+      ]),
     ]),
-    h('div', { class: 'card-body' }, [
-      h('div', { class: 'row', style: { alignItems: 'flex-start', gap: '16px' } }, [preview, fields]),
-    ]),
-  ]);
+    // 目标地址变了就得重查 —— 由外层的地址字段调用。
+    retarget: scheduleLookup,
+  };
 }
 
 function iconPreviewSrc(iconModel) {

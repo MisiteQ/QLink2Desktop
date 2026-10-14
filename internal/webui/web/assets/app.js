@@ -27,13 +27,16 @@ import * as help from './modules/views/help.js';
 
 const VIEWS = { desktop, discovery, forward, library, settings, system, help };
 
+// 侧边栏**只放导航**：早先每项右侧还挂过一个计数徽标，用户明确要求去掉
+// （"把这个侧边栏的数字和圆圈显示效果都去掉"）。数字在各页面里本来就有，
+// 挂在导航上既抢注意力，又要为它单独维护一套"启动时把四份列表都拉一遍"的逻辑。
 const NAV = [
-  { key: 'desktop', label: '桌面应用', iconName: 'desktop', badge: () => state.links.length },
-  { key: 'discovery', label: '服务发现', iconName: 'activity', badge: () => state.discovery.ports.length },
+  { key: 'desktop', label: '桌面应用', iconName: 'desktop' },
+  { key: 'discovery', label: '服务发现', iconName: 'activity' },
   // 端口转发紧跟服务发现：发现到的端口常常就是转发的目标，
   // 两个界面挨着能少一次来回切页。
-  { key: 'forward', label: '端口转发', iconName: 'shuffle', badge: () => state.forwards.length },
-  { key: 'library', label: '图标库', iconName: 'image', badge: () => state.icons.length },
+  { key: 'forward', label: '端口转发', iconName: 'shuffle' },
+  { key: 'library', label: '图标库', iconName: 'image' },
   { key: 'settings', label: '设置', iconName: 'gear' },
   { key: 'system', label: '系统与日志', iconName: 'terminal' },
   // 帮助放在最后一格：它不参与日常操作，但需要时必须在同一个列表里找得到，
@@ -98,42 +101,9 @@ async function bootstrap() {
     connectEvents();
     navigate(location.hash.replace('#', '') || 'desktop', false);
     loadLogsQuietly();
-    refreshBadges();
   } catch (err) {
     bootFailed(err, '界面渲染');
   }
-}
-
-// refreshBadges 把各页面的**条目数**拉齐，让侧边栏徽标一进来就是对的。
-//
-// 为什么需要它：徽标数字取自 `state.links / discovery.ports / forwards / icons`，
-// 而这四处原先各自只在自己页面的 mount() 里填充。于是没进过那个页面就没有数据，
-// 徽标要等用户点进去才出现 —— 用户的原话是"每次都得点击一下才能显示出来那个数值"。
-// 这不是渲染慢，是**数据从来没被拉过**。
-//
-// 四个请求并发发出，任一失败都只默默跳过：徽标是辅助信息，不该因为它
-// 把启动流程拖住或弹出报错（真正的错误由各自页面在用户主动操作时给出）。
-async function refreshBadges() {
-  const tasks = [
-    api.links.list().then((res) => patch({ links: res.items || res || [] })),
-    api.forwards.list().then((res) => patch({ forwards: res.items || [] })),
-    api.icons.list().then((res) => patch({ icons: res.items || [] })),
-  ];
-  // 端口这一格**刻意不主动拉**：唯一能拿到端口列表的接口是 discovery.ports，
-  // 而它带 force 就会去扫真实网段 —— 在用户没要求的时候发起扫描是越权的，
-  // 也会让首次打开变慢。所以这里的规矩是：只有"用户已经扫过、
-  // 或服务端缓存里有上次结果"时才填，否则徽标显示为 0（即不显示）。
-  // 换句话说，端口徽标的"缺失"是诚实的，其余三个不该有这个现象。
-  if (state.discovery.ports.length === 0) {
-    tasks.push(
-      api.discovery.ports().then((res) => {
-        const items = Array.isArray(res) ? res : (res && res.items) || [];
-        if (items.length) patch({ discovery: { ...state.discovery, ports: items } });
-      }),
-    );
-  }
-  const settled = await Promise.allSettled(tasks);
-  if (settled.some((s) => s.status === 'fulfilled')) renderNav();
 }
 
 // bootFailed 把启动失败的原因明确摆到界面上。
@@ -193,32 +163,19 @@ function showShell() {
 function renderNav() {
   const nav = $('#nav');
   if (!nav) return;
-  replace(nav, NAV.map((item) => {
-    const badge = item.badge ? item.badge() : 0;
-    return h('button', {
-      class: `nav-item ${state.view === item.key ? 'active' : ''}`,
-      type: 'button',
-      dataset: { view: item.key },
-      onclick: () => navigate(item.key),
-    }, [
-      h('span', { class: 'nav-icon' }, [icon(item.iconName, 17)]),
-      // 文字必须有自己的 class：窄屏要隐藏的是「文字」这一种语义。
-      // 早先没有这个 class，窄屏只能写 `span:not(.nav-badge){display:none}`，
-      // 而图标也是 span —— 于是图标连文字一起被藏掉，七个功能项全变成
-      // 看不见、只有 37×14px 的空白按钮。
-      h('span', { class: 'nav-label', text: item.label }),
-      // 计数为 0 时**不显示徽标**：一枚写着 0 的角标没有信息量，
-      // 反而让人以为"这里出错了"。
-      badge > 0
-        ? h('span', {
-            class: `nav-badge${badge > 99 ? ' nav-badge-wide' : ''}`,
-            // 超过两位数就缩成 99+：否则「104」会把图标顶歪、把邻居挤变形
-            text: badge > 99 ? '99+' : String(badge),
-            title: `${item.label} 共 ${badge} 项`,
-          })
-        : null,
-    ]);
-  }));
+  replace(nav, NAV.map((item) => h('button', {
+    class: `nav-item ${state.view === item.key ? 'active' : ''}`,
+    type: 'button',
+    dataset: { view: item.key },
+    onclick: () => navigate(item.key),
+  }, [
+    h('span', { class: 'nav-icon' }, [icon(item.iconName, 17)]),
+    // 文字必须有自己的 class：窄屏要隐藏的是「文字」这一种语义。
+    // 早先没有这个 class，窄屏只能写 `span:not(.nav-icon){display:none}` 这类
+    // 按标签名选的规则，而图标也是 span —— 于是图标连文字一起被藏掉，
+    // 七个功能项全变成看不见、只有 37×14px 的空白按钮。
+    h('span', { class: 'nav-label', text: item.label }),
+  ])));
 }
 
 function renderTopbar() {

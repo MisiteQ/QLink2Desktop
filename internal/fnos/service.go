@@ -1,6 +1,7 @@
 package fnos
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -390,12 +392,7 @@ func (s *Service) buildSpec(l domain.Link, portOverride int) PackageSpec {
 		port = 0
 	}
 
-	icons := ResolveIcon(IconRequest{
-		Icon:        l.Icon,
-		UploadDir:   s.IconsDir(),
-		Candidates:  iconCandidates(l),
-		AllowRemote: s.allowRemoteIcon,
-	})
+	icons := ResolveIcon(s.iconRequest(l))
 
 	spec := PackageSpec{
 		AppName:   l.EffectiveAppName(),
@@ -418,9 +415,204 @@ func (s *Service) buildSpec(l domain.Link, portOverride int) PackageSpec {
 	return spec
 }
 
+// iconRequest 把一条链接翻译成图标解析的输入。
+//
+// 打包（buildSpec）与面板预览（ResolveLinkIcon）都从这里取参数，两者因此
+// 必然一致。若各拼一份，迟早会出现「编辑器里预览一个样、桌面图标另一个样」
+// 这种最难排查的不一致 —— 而它只要发生一次就足以让用户怀疑整个功能。
+func (s *Service) iconRequest(l domain.Link) IconRequest {
+	return IconRequest{
+		Icon:          l.Icon,
+		UploadDir:     s.IconsDir(),
+		Candidates:    iconCandidates(l),
+		SiteURL:       iconSiteURL(l),
+		SkipTLSVerify: l.SkipTLSVerify,
+		AllowRemote:   s.allowRemoteIcon,
+	}
+}
+
+// ResolveLinkIcon 解析一条链接最终会用到的图标，并把**过程**一并返回。
+//
+// 这是面板上「正在查找 / 命中官方图标库 / 已从站点 favicon 取得 / 没找到」
+// 这套提示的数据来源 —— 只回一枚图标的话，界面上说不清到底发生过什么。
+func (s *Service) ResolveLinkIcon(l domain.Link) IconResolution {
+	return ResolveIconEx(s.iconRequest(l))
+}
+
+// ---------------------------------------------------------------------------
+// 自动图标落盘
+// ---------------------------------------------------------------------------
+//
+// 「自动」档解析出来的图标要落一份到图标目录，原因不是性能，而是**并发**：
+// 列表页要给每条链接显示缩略图，若改成前端逐条去调解析接口，一个有二十条
+// 链接的页面会同时打出二十个可能访问外网的请求。本项目在飞牛统一网关下
+// 已经踩过「并发转发不可靠」这个坑，列表页绝不能再做成 N 个并发请求。
+// 落盘之后，列表拿到的只是一个本地 PNG 的地址。
+
+// autoIconPrefix 是自动生成图标在图标目录里的文件名前缀。
+//
+// 与用户上传的图标同目录、靠前缀区分，是为了不动 /icons/{name} 这条既有
+// 路由（它也承载着飞牛桌面 <img> 的引用）。图标库列表会把这个前缀过滤掉：
+// 它们是程序产物，不该混进「我的图标」里。
+const autoIconPrefix = "auto-"
+
+// AutoIconName 返回某条链接的自动图标文件名；链接没有可用 ID 时返回空串。
+func AutoIconName(l domain.Link) string {
+	slug := domain.SanitizeFilePart(l.ID)
+	if slug == "" {
+		return ""
+	}
+	return autoIconPrefix + slug + ".png"
+}
+
+// autoIconState 记录「这个链接上一次是按什么输入解析的」。
+//
+// 它存在的唯一理由是**终止广播循环**：解析 → 广播 → 前端重拉列表 →
+// 若再解析就会无限循环。记下输入签名后，同样的输入只解析一次。
+// 结果本身不进这里 —— 没找到图标也是合法结果，同样只试一次。
+var (
+	autoIconMu    sync.Mutex
+	autoIconState = map[string]string{}
+)
+
+// autoIconSignature 是「会改变解析结果」的那些输入的指纹。
+//
+// 只包含真正参与解析的字段：图标配置、站点地址、候选关键词、证书开关。
+// 用它而不是 UpdatedAt，是因为改个备注名不该重新去抓一遍图标，
+// 而改了端口 / 路径则必须重抓。
+func autoIconSignature(l domain.Link) string {
+	return strings.Join([]string{
+		string(l.Icon.Source), l.Icon.Ref, l.Icon.Text, l.Icon.TextColor, l.Icon.BgColor,
+		iconSiteURL(l),
+		strings.Join(iconCandidates(l), "\x00"),
+		strconv.FormatBool(l.SkipTLSVerify),
+		strconv.FormatBool(l.Enabled),
+	}, "\x01")
+}
+
+// EnsureAutoIcon 在需要时解析并落盘某条链接的自动图标。
+//
+// 返回 changed 表示「这次真的动过盘上的文件」，调用方据此决定要不要通知前端；
+// 返回 res 则让调用方能顺手把来源讲给用户听。
+//
+// 它是幂等的：同一组输入只会真正解析一次，重复调用直接返回 changed=false。
+func (s *Service) EnsureAutoIcon(l domain.Link) (bool, IconResolution) {
+	// 非「自动」档不归这里管：用户明确指定了图标，我们不该在背后另存一份。
+	if l.Icon.Source != domain.IconAuto {
+		return false, IconResolution{}
+	}
+	name := AutoIconName(l)
+	if name == "" {
+		return false, IconResolution{}
+	}
+	dir := s.IconsDir()
+	if strings.TrimSpace(dir) == "" {
+		return false, IconResolution{}
+	}
+
+	sig := autoIconSignature(l)
+	autoIconMu.Lock()
+	if prev, ok := autoIconState[l.ID]; ok && prev == sig {
+		autoIconMu.Unlock()
+		return false, IconResolution{}
+	}
+	autoIconMu.Unlock()
+
+	res := s.ResolveLinkIcon(l)
+
+	changed := s.writeAutoIcon(dir, name, res)
+	autoIconMu.Lock()
+	autoIconState[l.ID] = sig
+	autoIconMu.Unlock()
+	return changed, res
+}
+
+// writeAutoIcon 把解析结果落到磁盘，返回文件状态是否发生变化。
+//
+// 只有「真的从外部拿到了东西」才落盘。默认图标 / 文字图标不落：
+// 前者前端直接引用现成的 /icons/default-64.png，后者随配色实时渲染，
+// 落一份反而会在用户改设置后留下一张对不上的陈旧图片。
+func (s *Service) writeAutoIcon(dir, name string, res IconResolution) bool {
+	path := filepath.Join(dir, name)
+	keep := (res.Source == IconSourceFavicon || res.Source == IconSourceOfficial) && len(res.Small) > 0
+
+	if !keep {
+		// 来源变了（比如从 favicon 改成手工填的网址），把旧文件清掉，
+		// 否则列表里会一直挂着一张已经不成立的图标。
+		return os.Remove(path) == nil
+	}
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		slog.Warn("自动图标目录创建失败", "dir", dir, "error", err)
+		return false
+	}
+	// 内容一致就不重写：避免每次对账都刷新 mtime，
+	// 而 mtime 是图标库列表的排序依据 —— 无谓地刷新会让列表自己跳动。
+	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, res.Small) {
+		return false
+	}
+	if err := os.WriteFile(path, res.Small, 0o644); err != nil {
+		slog.Warn("自动图标落盘失败", "path", path, "error", err)
+		return false
+	}
+	slog.Info("已生成自动图标", "file", name, "source", string(res.Source), "detail", res.Detail)
+	return true
+}
+
+// AutoIconFile 返回某条链接**当前实际存在**的自动图标文件名，没有则返回空串。
+func (s *Service) AutoIconFile(l domain.Link) string {
+	if l.Icon.Source != domain.IconAuto {
+		return ""
+	}
+	name := AutoIconName(l)
+	if name == "" {
+		return ""
+	}
+	dir := s.IconsDir()
+	if strings.TrimSpace(dir) == "" {
+		return ""
+	}
+	if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+		return ""
+	}
+	return name
+}
+
+// RemoveAutoIcon 清掉某条链接的自动图标文件与状态（删除链接时调用）。
+func (s *Service) RemoveAutoIcon(l domain.Link) {
+	name := AutoIconName(l)
+	autoIconMu.Lock()
+	delete(autoIconState, l.ID)
+	autoIconMu.Unlock()
+	if name == "" || strings.TrimSpace(s.IconsDir()) == "" {
+		return
+	}
+	_ = os.Remove(filepath.Join(s.IconsDir(), name))
+}
+
+// IsAutoIconFile 报告一个文件名是否是本模块生成的自动图标。
+// 图标库列表据此把它们过滤出去。
+func IsAutoIconFile(name string) bool { return strings.HasPrefix(name, autoIconPrefix) }
+
 // iconCandidates 汇总可用于自动匹配官方图标的关键词。
 func iconCandidates(l domain.Link) []string {
 	return []string{l.Container.Image, l.Container.Name, l.Container.Service, l.Name}
+}
+
+// iconSiteURL 给出「去哪个地址要站点自己的 favicon」。
+//
+// 三种形态各自指向**真正提供页面的那个地址**：
+//   - 网址快捷方式 → 用户填的目标网址本身；
+//   - 反向代理     → 后端真实地址（代理端口此刻可能还没起来，
+//     而后端地址是用户在表单里填的、确定存在的那个）；
+//   - 本机端口     → http://localhost:<port>，直接问本机服务。
+//
+// 拿不到地址（没填 host / port）就返回空串，favicon 那一档自动跳过。
+func iconSiteURL(l domain.Link) string {
+	if l.Kind == domain.KindShortcut {
+		return l.ShortcutURL()
+	}
+	return l.BackendURL()
 }
 
 // ---------------------------------------------------------------- 卸载

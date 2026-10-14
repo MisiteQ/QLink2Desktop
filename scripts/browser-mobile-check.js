@@ -101,15 +101,11 @@ async function inspect(page) {
       contentPadBottom: content ? getComputedStyle(content).paddingBottom : '',
       pipCount: document.querySelectorAll('.sidebar-foot .pip').length,
       pipVisible: vis(document.querySelector('.sidebar-foot .pip')),
-      // 徽标：图标右上角那个计数。这里同时收它的文字与位置。
-      badges: Array.from(document.querySelectorAll('.nav .nav-item')).map((it) => {
-        const b = it.querySelector('.nav-badge');
-        return {
-          label: (it.querySelector('.nav-label') || {}).textContent || '',
-          text: b ? b.textContent.trim() : null,
-          right: b ? Math.round(b.getBoundingClientRect().right) : 0,
-        };
-      }),
+      // 侧边栏不该再有任何计数徽标（用户要求把那一排数字和圆圈整个去掉）。
+      // 统计的是**渲染出来的节点**，不是样式 —— 留着 DOM 却用 CSS 藏起来
+      // 也算没去掉：将来某个断点会把它重新露出来。
+      badgeCount: document.querySelectorAll(
+        '.nav .nav-badge, .nav .nav-item .badge, .nav .nav-item [class*="badge"]').length,
       vw: window.innerWidth,
       vh: window.innerHeight,
       navScrollW: (() => { const n = document.querySelector('.nav'); return n ? { scroll: n.scrollWidth, client: n.clientWidth } : null; })(),
@@ -234,28 +230,23 @@ async function inspect(page) {
           tag('宽屏仍是左侧栏'), JSON.stringify(s.sidebar));
       }
 
-      // ---- 通用：状态点可见 ----
-      check(s.pipCount > 0 && s.pipVisible, tag('状态指示点可见'),
-        `count=${s.pipCount} visible=${s.pipVisible}`);
+      // ---- 通用：状态点 —— 窄屏撤掉，宽屏保留 ----
+      // 窄屏里 .pip-text 本来是隐藏的，于是那两个点退化成一枚没有任何文字的
+      // 绿圆点：既看不出它代表什么，也看不出状态变了没有。
+      // 用户的原话是"除了占空间没有其他的用处"。宽屏有文字说明，照旧保留。
+      if (narrow) {
+        check(s.pipCount > 0 && !s.pipVisible, tag('窄屏不显示状态点（省掉那一格）'),
+          `count=${s.pipCount} visible=${s.pipVisible}`);
+      } else {
+        check(s.pipCount > 0 && s.pipVisible, tag('宽屏状态点仍带文字可见'),
+          `count=${s.pipCount} visible=${s.pipVisible}`);
+      }
 
-      // ---- 通用：徽标一进页面就该有，不能等用户点进那个页面 ----
-      // 用户报的："侧边栏标记数量的这个部分，每次都得点击一下才能显示出来那个数值"。
-      // 根因是徽标数字取自各视图自己 mount() 时才拉的列表 —— 没进过那个页面
-      // 就没有数据。数据由 browser-e2e.py 在下游统一造好（空环境下 0 项不显示
-      // 徽标是刻意的，所以不造数据这条断言会因为集合为空而空过）。
-      const withBadge = s.badges.filter((b) => b.text !== null);
-      check(withBadge.length >= 3, tag('徽标一进页面就在（不需要先点进那个页面）'),
-        `只有 ${withBadge.length} 个徽标：` + s.badges.map((b) => `${b.label}=${b.text}`).join(' '));
-
-      // 徽标不能跑到屏幕外：它是靠 left: calc(50% + Npx) 定位的，
-      // 超窄屏上若算错，数字会被裁掉一半。
-      const badgeOut = withBadge.filter((b) => b.right > s.vw);
-      check(badgeOut.length === 0, tag('徽标都在屏幕内'),
-        badgeOut.map((b) => `${b.label} 右缘=${b.right}/${s.vw}`).join(' '));
-
-      // 计数为 0 时不该显示一枚写着 0 的角标
-      const zeroBadge = s.badges.filter((b) => b.text === '0');
-      check(zeroBadge.length === 0, tag('计数为 0 时不显示徽标'), zeroBadge.map((b) => b.label).join(' '));
+      // ---- 通用：侧边栏不该再有计数徽标 ----
+      // 用户要求把"侧边栏的数字和圆圈"整个去掉。断言节点数而不是"看不见"：
+      // 留一堆被 CSS 藏起来的节点，换个断点就会重新冒出来。
+      check(s.badgeCount === 0, tag('侧边栏没有计数徽标'),
+        `仍有 ${s.badgeCount} 个徽标节点`);
 
       // 截图落到临时目录：留在仓库根会污染工作区（且 .gitignore 没覆盖它）
       await page.screenshot({

@@ -1310,8 +1310,8 @@ def main() -> int:
     )
 
     # ---- 窄屏导航：一个「元素存在」查不出来的可见性故障 ----------------------
-    # 用户报「手机模式下左侧的侧边栏没有了，不能切换功能区」。根因是窄屏规则
-    # `.nav-item span:not(.nav-badge){display:none}` —— 本意「只留图标」，
+    # 用户报「手机模式下左侧的侧边栏没有了，不能切换功能区」。根因是一条按
+    # 标签名排除某个 class 的窄屏规则（`span:not(...)`）—— 本意「只留图标」，
     # 但图标本身也是 span，于是图标与文字一起被藏掉，七个功能项变成
     # 看不见、仅 37×14px 的空白按钮。
     # 静态守卫在这里格外关键：图标一直在 DOM 里、`hidden` 属性从未被设置过，
@@ -1391,11 +1391,237 @@ def main() -> int:
         f"当前 {icon_px.group(1) + 'px' if icon_px else '取不到'} —— "
         "图标小到看不清时，「可见 / 能点」类断言仍然全绿，只有量尺寸能发现",
     )
+    # 侧边栏**只放导航**：用户要求把那一排「数字 + 圆圈」整个去掉。
+    # 断言"节点根本不存在"而不是"被 CSS 藏起来" —— 留着 DOM 换个断点就会
+    # 重新冒出来，而且数据还得有人去拉（那正是上一轮为徽标改出来的逻辑）。
+    check(
+        "侧边栏不再有计数徽标（数字与圆圈整个去掉）",
+        "nav-badge" not in app_js and "nav-badge" not in style_code,
+        "用户明确要求去掉，app.js / style.css 里都不该再有它",
+    )
+    # 窄屏把状态点**整格**撤掉：那里没有文字，只剩一枚看不出含义的绿点。
+    check(
+        "窄屏撤掉状态点（只有圆点、没有文字的指示灯没有信息量）",
+        re.search(r"\.sidebar-foot\s*\{[^}]*display:\s*none", narrow_css, re.S) is not None,
+        "窄屏必须把 .sidebar-foot 整格隐藏；只藏文字会留下一个光秃秃的点",
+    )
     check(
         "窄屏导航有真浏览器回归（规矩不能只写在注释里）",
         os.path.isfile(os.path.join(repo_root, "scripts", "browser-mobile-check.js"))
         and "browser-mobile-check.js" in read_text(os.path.join(repo_root, "scripts", "browser-e2e.py")),
         "静态规则守不住「图标被藏」，得有人在真视口里量尺寸、按真实坐标点",
+    )
+    # 「正在查找…」是一个**只在请求进行中存在的瞬时状态**：静态守卫能查到
+    # 代码里有这行字，查不到它有没有被画到屏幕上、有没有被样式压没。
+    # 所以"过程可见"这件事必须有人在真浏览器里盯着看。
+    # 光有文件名常量不算接上：必须真的被**当成参数传给 node**。
+    # 反向验证时把调用换回 mobile 脚本，常量声明还在，只查文件名是抓不住的。
+    check(
+        "图标查找过程有真浏览器回归（找一个瞬时状态，静态断言守不住）",
+        os.path.isfile(os.path.join(repo_root, "scripts", "browser-icon-check.js"))
+        and "[node, ICON_SCRIPT, url]" in read_text(os.path.join(repo_root, "scripts", "browser-e2e.py")),
+        "「有提示」的对立面是「节点建了却没挂进界面」，只有渲染出来才看得见",
+    )
+
+    # ---- 「自动」图标：真的去抓站点自己的 favicon ---------------------------
+    # 用户报的是「自动获取图标，能不能直接自动抓取，一般就是通过直接抓 url 的
+    # favicon 来获得的」。这一档的价值在于**内网服务**：公开图标库里不会有
+    # 用户自家 NAS 上跑的那个服务，只有它自己的 favicon 认得出来。
+    icon_go = read_text(os.path.join(repo_root, "internal", "fnos", "icon.go"))
+    favicon_go = read_text(os.path.join(repo_root, "internal", "fnos", "favicon.go"))
+    service_go = read_text(os.path.join(repo_root, "internal", "fnos", "service.go"))
+    # 解析链的实现只在一处（ResolveIconEx），ResolveIcon 必须委派过去。
+    #
+    # 这条守卫是**被自己坑出来的**：下面那几条断言原先盯着 ResolveIcon 的函数体，
+    # 拆分之后它们就变成了在检查一个没人调用的壳 —— 而"守卫盯着错的函数"
+    # 与"守卫全绿"长得一模一样。所以先钉死这层委派关系。
+    resolve_body = extract_fn_body(icon_go, "func ResolveIcon(")
+    resolve_ex_body = extract_fn_body(icon_go, "func ResolveIconEx(")
+    check(
+        "图标解析链只有一个实现，ResolveIcon 只是它的薄壳",
+        bool(resolve_body) and "ResolveIconEx(req)" in resolve_body and bool(resolve_ex_body),
+        "两处各写一份必然会漂移；而守卫盯着不执行的那一份，等于没守",
+    )
+    check(
+        "favicon 这一档接进了图标解析，且排在官方图标库之后",
+        resolve_ex_body.count("siteFaviconLookup(") == 1
+        and resolve_ex_body.find("matchOfficialIconKeyword(") < resolve_ex_body.find("siteFaviconLookup("),
+        "顺序反了的话，每个链接都会先去打一次站点请求，还会拿一张 16×16 的 "
+        "favicon 顶掉人工挑选的官方图标",
+    )
+    # 离线模式（--no-remote-icon）下不许发请求：内网地址看起来无害，
+    # 但那仍然是本进程主动建立的连接。
+    remote_block = extract_fn_body(resolve_ex_body or icon_go, "if req.AllowRemote {")
+    check(
+        "favicon 抓取受「允许远端图标」开关管辖",
+        bool(remote_block) and "siteFaviconLookup(" in remote_block,
+        "关掉远端图标后，这一步必须整体跳过（不许偷偷发内网请求）",
+    )
+    check(
+        "站点地址与证书开关由链路形态推导后传入",
+        "SiteURL:       iconSiteURL(l)" in service_go or "SiteURL: iconSiteURL(l)" in service_go,
+        "拿不到地址就应传空串，让这一档自动跳过；不能凭空造一个地址出来",
+    )
+    # 官方图标库那一档是个乘法：候选 × 关键词 × 4 个 CDN 节点。国内访问
+    # jsDelivr 经常整体不通，每次都要等满单请求超时，最坏能把「保存」挂几分钟。
+    check(
+        "官方图标库匹配也有总时间预算（不是逐个请求各自等超时）",
+        "officialIconBudget" in icon_go
+        and "context.WithTimeout" in extract_fn_body(icon_go, "func matchOfficialIconKeyword("),
+        "候选数 × 关键词数 × 4 个 CDN 的乘法，最坏几十次 8 秒超时，而用户在等这一刻",
+    )
+    check(
+        "官方图标库匹配会回报命中的关键词（否则界面说不出「命中什么」）",
+        "return set, name, true" in icon_go,
+        "只回一枚图标的话，界面只能写「已找到」，说不出是凭什么找到的",
+    )
+    # ICO 是这条路上最容易「看起来没生效」的地方：标准库没有 ICO 解码器，
+    # 而 /favicon.ico 绝大多数就是 ICO —— 不自己解的话整条路会全程失败。
+    decode_body = extract_fn_body(favicon_go, "func decodeIconImage(")
+    check(
+        "站点图标解码先走 ICO 分支（标准库解不了 ICO）",
+        decode_body.find("decodeICO(") >= 0
+        and decode_body.find("decodeICO(") < decode_body.find("decodeImage("),
+        "image.Decode 对 ICO 直接报 unknown format，而 /favicon.ico 绝大多数是 ICO",
+    )
+    check(
+        "ICO 解码覆盖「PNG 内嵌」与「DIB 位图」两种内容",
+        "func decodeICOEntry(" in favicon_go and "func decodeDIB(" in favicon_go
+        and re.search(r"bpp\s*!=\s*1\s*&&\s*bpp\s*!=\s*4\s*&&\s*bpp\s*!=\s*8\s*&&\s*bpp\s*!=\s*24\s*&&\s*bpp\s*!=\s*32", favicon_go) is not None,
+        "现代 favicon 是 PNG-in-ICO，老站点是 1/4/8/24/32 位的 DIB —— 两种都要能解",
+    )
+    # 抓取必须**有总预算**：这段代码跑在「保存 / 放到桌面」这条用户正在等的
+    # 路径上，逐个候选设超时的话最坏会拖到二十几秒。
+    check(
+        "抓取有总时间预算，而不是每个候选各自计时",
+        "context.WithTimeout" in favicon_go and "faviconBudget" in favicon_go,
+        "逐个候选设超时的话，试满 4 个候选最坏要二十几秒，而用户在等这一刻",
+    )
+
+    # ---- 图标解析的过程必须对用户可见 ----------------------------------------
+    #
+    # 用户的原话是「这个图标也没有自动搜索百度的图标啊，这个过程有个什么提示吗
+    # 或者能让人知道搜索中或者搜索状态」，随后补充「不光是快捷方式，本机端口和
+    # 端口映射也有这样的问题……过程也没有提示」。
+    #
+    # 追下来真正的病根不在抓取本身（后端其实抓到了），而在**结果与过程都不回传**：
+    # 编辑器那一档永远画着内置默认图，"还没找""找了没找到""根本没找"三种情况
+    # 在界面上完全同形。所以这组守卫盯的是"有没有把话讲出来"，
+    # 而不是"有没有抓到" —— 后者早就绿了，用户依然报问题。
+    icons_api = read_text(os.path.join(repo_root, "internal", "httpapi", "icons.go"))
+    server_go = read_text(os.path.join(repo_root, "internal", "httpapi", "server.go"))
+    api_js = read_text(os.path.join(web_root, "modules", "api.js"))
+    editor_js = read_text(os.path.join(web_root, "modules", "views", "editor.js"))
+    desktop_js = read_text(os.path.join(web_root, "modules", "views", "desktop.js"))
+
+    check(
+        "解析结果带回来源与一句可展示的说明（否则界面只能显示一张图）",
+        "type IconResolution struct" in icon_go
+        and "Source IconSource" in icon_go
+        and "Detail string" in icon_go,
+        "只回一枚图标的话，「还没找」和「找了没找到」在界面上分不出来",
+    )
+    check(
+        "抓取失败时说明「问了哪个地址、为什么没有」",
+        "func faviconMissDetail(" in icon_go
+        and "faviconMissDetail(req.SiteURL)" in resolve_ex_body,
+        "一句「没找到」和「压根没去问」对用户毫无区别",
+    )
+    check(
+        "离线模式也说明是开关关掉了抓取（而不是含糊的「没找到」）",
+        "允许远端图标" in resolve_ex_body,
+        "用户关掉了远端图标，界面却暗示「找过了」，会让人以为功能坏了",
+    )
+    check(
+        "有「现场解析一次」的接口，且不依赖链接已经落库",
+        'api.HandleFunc("POST /api/icons/resolve", s.handleResolveIcon)' in server_go
+        and "func (s *Server) handleResolveIcon(" in icons_api,
+        "编辑器里用户常常还没填完就想看图标，接口必须能吃下未落库的草案",
+    )
+    # 这条守的是一个真实踩过的坑：图标解析接口收的是**整条链接**的表单数据
+    # （前端直接回传 toPayload 的结果），而它自己只用得上几个字段。
+    # 一开始用了严格解码，第一次真机验证就撞上 `json: unknown field "desc"` ——
+    # 报错内容和图标毫无关系，界面上只表现为"查找失败"。
+    check(
+        "解析接口对请求体宽松解码（它收的是别人的 DTO）",
+        "decodeJSONLenient(w, r, &req)" in icons_api
+        and "func decodeJSONLenient(" in read_text(os.path.join(repo_root, "internal", "httpapi", "respond.go")),
+        "严格解码会让链接以后每加一个字段都把这个预览打挂",
+    )
+    check(
+        "解析接口把预览图与来源一起回给前端",
+        'body["preview"]' in icons_api
+        and '"message":' in icons_api
+        and '"detail":' in icons_api
+        and '"elapsed_ms":' in icons_api,
+        "没有预览图，前端就只能继续画内置默认图 —— 那正是用户看到的现象",
+    )
+    check(
+        "前端确实调用了这个接口（名字出现 ≠ 真的用上）",
+        "api.icons.resolve(toPayload(model))" in editor_js,
+        "接口写好了没人调，与没写毫无区别",
+    )
+    auto_body = extract_fn_body(editor_js, "function buildIconSection(")
+    check(
+        "编辑器「自动」档会显示查找中 / 已找到 / 没找到三种状态",
+        "正在查找图标" in auto_body and "lookupAuto" in auto_body and "statusBox" in auto_body,
+        "这正是用户问的「这个过程有个什么提示吗」",
+    )
+    check(
+        "状态行真的被挂进了界面，不是建了对象就完事",
+        re.search(r"append\(fields,.*statusBox", auto_body, re.S) is not None
+        or re.search(r"statusBox\s*\]", auto_body) is not None,
+        "建了 DOM 节点却没 append，界面上什么都看不到（本项目踩过同类坑）",
+    )
+    check(
+        "改地址 / 换形态会重新查找（否则一直挂着上一个地址的结果）",
+        "onTargetChange()" in editor_js and "retarget: scheduleLookup" in editor_js,
+        "用户改了端口但图标还是旧地址的 —— 会被当成「图标不更新」",
+    )
+    # 匹配必须落在**声明块**上，不能只搜类名。
+    # 反向验证时把 `.icon-status { ... }` 整条规则删掉，只留下 `.icon-status:empty`
+    # 之类的选择器，`.icon-status` in style_code 依然为真 —— 守卫照样全绿。
+    check(
+        "状态行有对应样式，且进行中/成功/失败三者同形",
+        re.search(r"\.icon-status\s*\{[^}]*display:\s*inline-flex", style_code) is not None
+        and re.search(r"\.icon-status:empty\s*\{[^}]*display:\s*none", style_code) is not None
+        and re.search(r"\.tag\.busy\s*\{[^}]*background:", style_code) is not None,
+        "缺样式的话标签会挤成一坨；空状态不收起则会留一条莫名其妙的空白",
+    )
+
+    # 列表缩略图：它是用户看到"图标没找着"的**第一现场**。
+    #
+    # 后端本来就会在对账时把图标装到桌面，但面板列表一直只认 Link.Icon 里
+    # 用户填的东西 —— 自动档于是永远显示内置默认图，用户据此判断"没找到"。
+    # 断言必须落在「真的写了盘」这一步上。只检查函数存在的话，
+    # 把落盘调用摘掉、函数留成空壳，守卫照样全绿（反向验证时就是这样）。
+    ensure_body = extract_fn_body(service_go, "func (s *Service) EnsureAutoIcon(")
+    write_body = extract_fn_body(service_go, "func (s *Service) writeAutoIcon(")
+    check(
+        "自动解析出的图标会落盘，并被列表读到",
+        "s.writeAutoIcon(dir, name, res)" in ensure_body
+        and bool(write_body) and "os.WriteFile(path, res.Small" in write_body
+        and "func (s *Service) AutoIconFile(" in service_go,
+        "不落盘的话，列表就得为每条链接并发打一个可能访问外网的请求",
+    )
+    check(
+        "视图带上自动图标的文件名与来历",
+        "IconAuto string" in read_text(os.path.join(repo_root, "internal", "domain", "status.go"))
+        and "views[i].IconAuto = s.deps.Service.AutoIconFile(l)" in server_go
+        and "views[i].IconAutoNote = note.detail" in server_go,
+        "少了这个字段，列表就无从显示真实图标，只能一律画默认图",
+    )
+    # 断言要落在"拿它当 src"上：写成 `if (view.icon_auto) return api.icons.defaultURL(64)`
+    # 时字段名仍然出现，但图标永远还是那张默认图。
+    check(
+        "列表缩略图优先用解析出来的图标",
+        "api.icons.url(view.icon_auto)" in extract_fn_body(desktop_js, "function thumbSrc("),
+        "这是用户看到「图标没自动找到」的第一现场",
+    )
+    check(
+        "程序生成的自动图标不混进用户图标库",
+        "fnos.IsAutoIconFile(" in icons_api,
+        "自动图标是程序产物，混进「我的图标」会让用户以为是自己传的",
     )
 
     # ---- 打包脚本：两个「名字撞车 / 顺序」陷阱 --------------------------------
