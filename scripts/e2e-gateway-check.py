@@ -1711,6 +1711,62 @@ def main() -> int:
         "少重新生成任何一处都不会报错，只表现为「桌面图标换了、页面里没换」",
     )
 
+    # ---- 从图标库里挑一枚已有图标 ---------------------------------------------
+    #
+    # 需求原话：「在添加图标的时候可以选择图标库里面的已有图标作为显示的图标」。
+    # 在此之前图标库只能往里传、不能从里选 —— 想复用一枚传过的图标，唯一的
+    # 办法是把那张图再从本机找出来重传一遍，于是同一个图标在 icons/ 目录里
+    # 堆成 miwifi.png / miwifi-1.png / miwifi-2.png 好几份，谁也说不清
+    # 哪份是哪条链接在用的。
+    #
+    # 这里守三件事，每件都对应一种"看起来做了、其实没做"：
+    #   1. 档位真的在；
+    #   2. 它**复用 upload 这一档**（文件名 + icons/ 目录），不新造 source ——
+    #      新造一个后端不认识的 source 不会有任何报错：表单照收、链接照存，
+    #      然后在解析链上被判成未知来源，一路降级到内置默认图标，而界面上
+    #      看起来一切正常；
+    #   3. 选中态真的画得出来。只把 class 加上、CSS 里没有对应规则，
+    #      用户点完还是不知道选上没有 —— "点了没反应"正是这一档最容易出的问题。
+    editor_js = read_text(os.path.join(web_root, "modules", "views", "editor.js"))
+    picker_body = extract_fn_body(editor_js, "function buildIconLibraryPicker(")
+
+    check(
+        "图标卡片里有「图标库」这一档",
+        "{ value: 'library', label: '图标库' }" in editor_js,
+        "没有这一档，用户只能把同一张图反复重传，图标目录里堆出一串副本",
+    )
+    check(
+        "「图标库」档复用 upload 来源，不新造后端不认识的 source",
+        re.search(r"model\.icon\.source = v === 'library' \? 'upload' : v;", editor_js) is not None,
+        "新造的 source 会一路穿过表单落进链接定义，再在解析链上悄悄退回默认图标",
+    )
+    check(
+        "从图标库选中的文件名写进 icon.ref（与「上传」档同构）",
+        "model.icon.ref = item.name;" in picker_body,
+        "写到别处的话，列表缩略图 / 桌面图标 / 打包三条已有路径都读不到它",
+    )
+    # 反向验证时把 `api.icons.list()` 换成一句空数组：静态与真视口会同时 FAIL。
+    check(
+        "「图标库」档真的去读图标库列表（不是画一个空网格）",
+        "api.icons.list()" in picker_body,
+        "读不到列表就只是一个空网格，用户会以为图标库是空的",
+    )
+    library_css = re.sub(r"/\*.*?\*/", "", read_text(os.path.join(web_root, "style.css")), flags=re.S)
+    check(
+        "选中态真的画得出来（class 与样式两条都要在）",
+        "classList.toggle('selected', on)" in picker_body
+        and re.search(r"\.icon-tile\.pick\.selected\s*\{", library_css) is not None,
+        "只加 class 不写样式 = 用户点了没反应，而这正是这一档最容易出的问题",
+    )
+    # 磁贴整块是一个按钮 —— 只让里面的小图可点会让点击目标缩到 60px 见方，
+    # 手机上基本点不准（本项目在窄屏导航上栽过一次同型的坑）。
+    check(
+        "整块磁贴都是点击目标，不是只有中间那张小图",
+        re.search(r"'icon-tile pick'", picker_body) is not None
+        or re.search(r'"icon-tile pick"', picker_body) is not None,
+        "点击目标只有 60px 见方，手机上点不准",
+    )
+
     # ---- 服务发现：同一个服务的多个套接字必须收成一行 -------------------------
     #
     # 用户的原话是「为什么扫描出来的端口是重复的，有 0.0.0.0 的有不带的，

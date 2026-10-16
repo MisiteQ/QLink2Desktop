@@ -5,10 +5,10 @@
  * 后者很容易出现「切到快捷方式后，上一个形态的端口还留在提交数据里」这类脏数据问题。
  */
 
-import { h, append, replace, clear, field, notify, switchBox, withBusy, modal, segmented } from '../dom.js';
+import { h, append, replace, clear, field, notify, switchBox, withBusy, modal, segmented, emptyState } from '../dom.js';
 import { icon } from '../icons.js';
 import { api, isTimeout } from '../api.js';
-import { state } from '../store.js';
+import { state, patch } from '../store.js';
 
 const KIND_META = {
   local: { label: '本机端口', hint: '服务就运行在这台设备上，桌面图标直连本机端口' },
@@ -485,9 +485,21 @@ function buildIconSection(model) {
   };
 
   /* ------------------------------------------------------------ 重建 */
+  // 当前在编的是哪一「档」。
+  //
+  // 它和 model.icon.source 不是一回事：「上传」与「图标库」最终都落到
+  // source = upload —— 图片本来就躺在 icons/ 目录里，靠文件名引用。对后端
+  // 来说「用户传了一张图」和「用户从图库里挑了一张」是同一件事，真正有区别
+  // 的只是**用户是怎么拿到这个文件名的**，那纯粹是界面上的事。
+  //
+  // 所以这里刻意不新造一个后端不认识的 source：新造出来的值会一路穿过表单、
+  // 落进链接定义，然后在解析链上被当成未知来源悄悄退回默认图标 ——
+  // 而界面上看起来一切正常（这个项目已经在"看起来正常"上栽过几次）。
+  let tab = model.icon.source || '';
+
   const rebuild = () => {
     clear(fields);
-    const src = model.icon.source;
+    const src = tab;
 
     if (src === 'text') {
       append(fields, h('div', { class: 'form-grid' }, [
@@ -524,6 +536,8 @@ function buildIconSection(model) {
         field('上传图片', fileInput, '建议 256×256 以上的正方形图片'),
         model.icon.ref ? field('已选文件', h('div', { class: 'mono truncate', text: model.icon.ref })) : null,
       ]));
+    } else if (src === 'library') {
+      append(fields, buildIconLibraryPicker(model, refreshPreview));
     } else {
       append(fields, h('div', { class: 'field' }, [
         h('div', { class: 'row', style: { gap: '8px', alignItems: 'center', flexWrap: 'wrap' } }, [
@@ -547,8 +561,11 @@ function buildIconSection(model) {
     { value: 'text', label: '文字' },
     { value: 'url', label: '网址' },
     { value: 'upload', label: '上传' },
-  ], model.icon.source || '', (v) => {
-    model.icon.source = v;
+    { value: 'library', label: '图标库' },
+  ], tab, (v) => {
+    tab = v;
+    // 「图标库」与「上传」共用 upload 这一档，理由见上面 tab 的注释。
+    model.icon.source = v === 'library' ? 'upload' : v;
     // 离开「自动」档要把在途请求的令牌推进一格，否则它回来时
     // 会往已经换掉的界面里写状态。
     autoToken++;
@@ -578,6 +595,93 @@ function iconPreviewSrc(iconModel) {
   if (iconModel.source === 'url' && iconModel.ref) return iconModel.ref;
   if (iconModel.source === 'upload' && iconModel.ref) return api.icons.url(iconModel.ref);
   return api.icons.defaultURL(256);
+}
+
+/**
+ * 「图标库」档：从已经上传过的图标里挑一枚当这条链接的图标。
+ *
+ * 为什么需要它：图标库此前只能往里传、不能从里选。想复用一枚传过的图标，
+ * 用户唯一的办法是把那张图再从本机找出来重传一遍 —— 于是同一个图标在
+ * icons/ 目录里堆成 miwifi.png / miwifi-1.png / miwifi-2.png 好几份，
+ * 谁也说不清哪份是哪条链接在用的。
+ *
+ * 选中后写的是 model.icon.ref = 文件名，与「上传」档完全同构，因此列表
+ * 缩略图（desktop.js）、桌面图标与打包这三条已有路径一行都不用改。
+ */
+function buildIconLibraryPicker(model, refreshPreview) {
+  const grid = h('div', { class: 'icon-grid' });
+  const status = h('span', { class: 'hint icon-library-status' });
+  const body = h('div');
+
+  // 选中态必须**看得见**。点一下之后只把文件名记进 model、界面上什么都不变，
+  // 用户没法判断到底选上了没有（这正是本项目反复踩到的那类问题）。
+  const syncSelected = () => {
+    const chosen = model.icon.ref || '';
+    let hit = false;
+    for (const tile of grid.querySelectorAll('.icon-tile')) {
+      const on = tile.dataset.name === chosen;
+      tile.classList.toggle('selected', on);
+      tile.setAttribute('aria-pressed', on ? 'true' : 'false');
+      if (on) hit = true;
+    }
+    status.textContent = hit
+      ? `已选择「${chosen}」。`
+      : '还没有选。不选也可以保存，那会回到「自动」按地址去匹配图标。';
+    return hit;
+  };
+
+  const draw = (items) => {
+    clear(grid);
+    for (const item of items) {
+      const tile = h('button', {
+        class: 'icon-tile pick', type: 'button', title: item.name,
+        dataset: { name: item.name },
+        onclick: () => {
+          model.icon.ref = item.name;
+          syncSelected();
+          refreshPreview();
+        },
+      }, [
+        h('img', { src: item.url, alt: item.name, loading: 'lazy' }),
+        h('span', { class: 'name', style: { display: 'block' }, text: item.name }),
+      ]);
+      append(grid, tile);
+    }
+    syncSelected();
+  };
+
+  const renderFromState = () => {
+    const items = state.icons || [];
+    if (!items.length) {
+      replace(body, emptyState(
+        '图标库里还没有图标',
+        '切到「上传」档传一张，或者去左侧「图标库」页批量上传，之后就能在这里直接选。',
+        icon('image', 36),
+      ));
+      syncSelected();
+      return;
+    }
+    replace(body, grid);
+    draw(items);
+  };
+
+  // 先给一句「正在读取」：图标库大概率已经由「图标库」页拉过一次，但用户
+  // 完全可能一进面板就直接点「新建」—— 那时 state.icons 还是空的，不拉一次
+  // 就会把"还没读过"画成"库里没有图标"。
+  if ((state.icons || []).length) {
+    renderFromState();
+  } else {
+    append(body, h('p', { class: 'hint', text: '正在读取图标库…' }));
+    api.icons.list().then((res) => {
+      // 写回全局 state：图标库页与这里是同一份数据，各存一份必然分叉
+      //（在编辑器里传了新图标，切回图标库页却看不到）。
+      patch({ icons: res.items || [] });
+    }).catch((err) => {
+      replace(body, h('p', { class: 'hint', text: `读取图标库失败：${err.message}` }));
+    }).then(renderFromState);
+  }
+
+  return h('div', { class: 'field' }, [body, status]);
 }
 
 function fileTypesInput(model) {

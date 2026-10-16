@@ -513,6 +513,10 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
   display: inline-flex; padding: 3px; gap: 2px;
   background: var(--bg-sunken); border-radius: var(--radius);
   border: 1px solid var(--border);
+  /* 档位变多之后（图标卡片现在有五档）窄屏上会顶到边界。
+     .card-head 本身已经 flex-wrap，但那个 segmented 自己不会换行 ——
+     与其让它溢出，不如允许它折到第二行。 */
+  max-width: 100%; flex-wrap: wrap;
 }
 .segmented button {
   border: 0; background: transparent; color: var(--text-soft);
@@ -723,6 +727,22 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
 .icon-tile .name { font-size: .72rem; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .icon-tile .tile-del { position: absolute; top: 5px; right: 5px; opacity: 0; transition: opacity .12s ease; }
 .icon-tile:hover .tile-del { opacity: 1; }
+
+/* 图标库**选择器**（链接编辑器里的「图标库」档）：整块磁贴本身就是一个按钮。
+   选中态必须有明确的外观 —— 只把文件名记进数据、界面上毫无变化的话，
+   用户点完不知道到底选上了没有。 */
+.icon-tile.pick {
+  appearance: none; width: 100%; font: inherit; color: inherit;
+  cursor: pointer; text-align: center;
+}
+.icon-tile.pick:hover { border-color: var(--accent-ring); background: var(--accent-soft); }
+.icon-tile.pick.selected { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 2px var(--accent-soft); }
+.icon-tile.pick.selected::after {
+  content: '✓'; position: absolute; top: 5px; right: 5px;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--accent-solid); color: var(--accent-on);
+  font-size: .7rem; font-weight: 700; line-height: 18px; text-align: center;
+}
 
 /* 端口列表 */
 

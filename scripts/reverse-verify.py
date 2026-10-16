@@ -9,9 +9,9 @@
 并且把"跑了多少条"和"失败多少条"一起打出来。
 
 用法：
-    make reverse-verify            静态守卫的反向验证（39 个场景）
-    make reverse-verify-gotest     行为型守卫的反向验证（跑 go test，5 个场景）
-    make reverse-verify-browser    真视口守卫的反向验证（8 个场景，跑得慢）
+    make reverse-verify            静态守卫的反向验证（45 个场景）
+    make reverse-verify-gotest     行为型守卫的反向验证（跑 go test，6 个场景）
+    make reverse-verify-browser    真视口守卫的反向验证（10 个场景，跑得慢）
     python scripts/reverse-verify.py <场景名>...            只跑指定场景
 
 为什么要有"行为型"这一层
@@ -394,6 +394,43 @@ SCENARIOS: list[tuple[str, str, str, str]] = [
         '		{filepath.Join(assetsDir, "logo_256.png"), set.Large, "内嵌默认图标"},',
         '		{filepath.Join(assetsDir, "logo_256.png"), set.Small, "内嵌默认图标"},',
     ),
+    # --- 从图标库里挑一枚已有图标 ---
+    (
+        "「图标库」这一档被摘掉（用户只能把同一张图反复重传）",
+        "internal/webui/web/assets/modules/views/editor.js",
+        "    { value: 'library', label: '图标库' },",
+        "    { value: 'library', label: '图库' },",
+    ),
+    (
+        "「图标库」新造了一个后端不认识的 source（会悄悄退回默认图标）",
+        "internal/webui/web/assets/modules/views/editor.js",
+        "    model.icon.source = v === 'library' ? 'upload' : v;",
+        "    model.icon.source = v;",
+    ),
+    (
+        "从图标库选中的文件名没写进 icon.ref（三条已有路径都读不到它）",
+        "internal/webui/web/assets/modules/views/editor.js",
+        "          model.icon.ref = item.name;",
+        "          model.icon.altRef = item.name;",
+    ),
+    (
+        "「图标库」档不再去读列表（只剩一个空网格）",
+        "internal/webui/web/assets/modules/views/editor.js",
+        "    api.icons.list().then((res) => {",
+        "    Promise.resolve({ items: [] }).then((res) => {",
+    ),
+    (
+        "选中态只切了个没人认识的 class（界面上等于没反应）",
+        "internal/webui/web/assets/modules/views/editor.js",
+        "      tile.classList.toggle('selected', on);",
+        "      tile.classList.toggle('picked', on);",
+    ),
+    (
+        "整块磁贴不再是一个按钮（点击目标缩到中间那张小图）",
+        "internal/webui/web/assets/modules/views/editor.js",
+        "        class: 'icon-tile pick', type: 'button', title: item.name,",
+        "        class: 'icon-tile', title: item.name,",
+    ),
 ]
 
 
@@ -471,6 +508,23 @@ BROWSER_SCENARIOS: list[tuple[str, str, str, str, bool, str]] = [
         "export function replace(node, children) {\n  append(node, children);",
         True,
         "discovery",
+    ),
+    # --- 从图标库里挑一枚已有图标 ---
+    (
+        "选中态只剩 class、样式没了（用户点完不知道选上没有）",
+        "internal/webui/web/assets/style.css",
+        ".icon-tile.pick.selected { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 2px var(--accent-soft); }",
+        ".icon-tile.pick.selected-unused { border-color: var(--accent); }",
+        True,
+        "icon",
+    ),
+    (
+        "从图标库选中后缩略图不再跟着换（点了没反应）",
+        "internal/webui/web/assets/modules/views/editor.js",
+        "          model.icon.ref = item.name;\n          syncSelected();\n          refreshPreview();",
+        "          model.icon.ref = item.name;\n          syncSelected();",
+        True,
+        "icon",
     ),
 ]
 

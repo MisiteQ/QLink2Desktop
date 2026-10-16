@@ -33,7 +33,7 @@ EXE :=
 endif
 
 # 版本号唯一来源：仓库根目录的 VERSION 文件（手动维护，脚本只读不写）。
-VERSION ?= $(shell tr -d '[:space:]' < VERSION 2>/dev/null || echo 1.2.7)
+VERSION ?= $(shell tr -d '[:space:]' < VERSION 2>/dev/null || echo 1.2.8)
 
 ARCH ?= x86
 
