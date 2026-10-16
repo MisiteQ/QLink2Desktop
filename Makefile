@@ -11,6 +11,10 @@
 #   make icons      从根目录源图重新生成全部图标资源
 #   make e2e        网关等效端到端验证（无需浏览器）
 #   make browser-e2e 真浏览器启动期验证（需 Chromium 系浏览器 + node）
+#                   可用 SECTIONS=nav,icon,discovery 只跑其中一段
+#   make reverse-verify          反向验证：把守卫对应的事实改坏，确认真的 FAIL
+#   make reverse-verify-gotest   同上，但针对行为断言（跑内部单测）
+#   make reverse-verify-browser  同上，但针对只有真视口才看得见的那几条
 #   make clean      清理构建产物
 #
 # 说明：真正完成 fpk 打包的是 scripts/build-fpk.sh，
@@ -29,13 +33,18 @@ EXE :=
 endif
 
 # 版本号唯一来源：仓库根目录的 VERSION 文件（手动维护，脚本只读不写）。
-VERSION ?= $(shell tr -d '[:space:]' < VERSION 2>/dev/null || echo 1.2.6)
+VERSION ?= $(shell tr -d '[:space:]' < VERSION 2>/dev/null || echo 1.2.7)
 
 ARCH ?= x86
 
+# 真浏览器验证要跑的段：nav（窄屏/宽屏导航）、icon（「自动」图标过程可见）、
+# discovery（服务发现端口行不重复）。只跑其中一段能快很多：
+#   make browser-e2e SECTIONS=discovery
+SECTIONS ?= nav,icon,discovery
+
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: all fpk fpk-all release build run test vet fmt icons clean check jscheck e2e browser-e2e verify reverse-verify reverse-verify-browser
+.PHONY: all fpk fpk-all release build run test vet fmt icons clean check jscheck e2e browser-e2e verify reverse-verify reverse-verify-gotest reverse-verify-browser
 
 all: fpk
 
@@ -92,7 +101,7 @@ e2e: build
 # 验证的是"浏览器拿到页面之后的行为"——缓存、预扫描、模块图失败，
 # 这些只看服务端响应是看不出来的。
 browser-e2e: build
-	$(PYTHON) scripts/browser-e2e.py --exe ./$(APP_NAME)$(EXE) --expect ok
+	$(PYTHON) scripts/browser-e2e.py --exe ./$(APP_NAME)$(EXE) --expect ok --sections $(SECTIONS)
 
 # 反向验证：把每条守卫对应的事实改坏，确认它真的会 FAIL。
 #
@@ -100,6 +109,11 @@ browser-e2e: build
 # 每加一条守卫就应当跑一次；不跑就等于默认它是形同虚设的。
 reverse-verify: build
 	$(PYTHON) scripts/reverse-verify.py
+
+# 行为断言的反向验证：静态断言看不出"写的那行有没有被执行到"，
+# 例如把锐化换成 `return out`，函数名和调用点一个不少。
+reverse-verify-gotest:
+	$(PYTHON) scripts/reverse-verify.py --gotest
 
 # 真视口那一层单独验（每条都要重编译 + 起浏览器，慢得多）。
 reverse-verify-browser: build

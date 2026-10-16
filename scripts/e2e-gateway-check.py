@@ -150,15 +150,28 @@ class GatewaySimulator:
             def do_DELETE(self):  # noqa: N802
                 self._proxy("DELETE")
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        class Server(ThreadingHTTPServer):
+            # 浏览器会主动掐掉它不再需要的请求（预扫描器的预取、被取消的 fetch），
+            # socketserver 默认会为每一次这样的断开往 stderr 打一整段 traceback。
+            # 那不是故障，但混在真实失败里会让"这轮到底有没有问题"变得难判 ——
+            # 而这个项目已经吃够了"噪声与失败同形"的亏。
+            def handle_error(self, request, client_address):
+                pass
+
+        self.server = Server(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
         self.port = self.server.server_address[1]
 
     def start(self) -> None:
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self._thread.start()
 
     def stop(self) -> None:
         self.server.shutdown()
+        # 等 serve_forever 真的退出再关套接字：不等的话它会带着一个已经关掉的
+        # 监听套接字继续转一圈，在解释器收尾阶段碰到已经失效的 stderr ——
+        # 结果是"全部通过"打完了，退出码却是非零（表现为 make 目标失败）。
+        self._thread.join(timeout=5)
         self.server.server_close()
 
 
@@ -1622,6 +1635,180 @@ def main() -> int:
         "程序生成的自动图标不混进用户图标库",
         "fnos.IsAutoIconFile(" in icons_api,
         "自动图标是程序产物，混进「我的图标」会让用户以为是自己传的",
+    )
+
+    # ---- 图标缩放：别把 logo 压缩太狠 ------------------------------------------
+    #
+    # 用户换了一版 logo，随后补的要求是「logo 的图别压缩太狠，有用户反映图标
+    # 都不清楚了」。图标只有 64 / 256 两档，而来源普遍是 512～2048 见方 ——
+    # 也就是说这条链上做的**全是缩小**，缩得越狠越糊，病根就在这里。
+    #
+    # 追下来是两层：旧的「反复折半 + 收尾双线性」本身就是一层近似（多一层
+    # 近似多一层模糊），而面积平均又是个低通滤波 —— 少了后一道锐化，
+    # 边缘必然被摊平。这组守卫盯的就是这两件事有没有真的落在代码里。
+    imageutil_go = read_text(os.path.join(repo_root, "internal", "fnos", "imageutil.go"))
+    hq_body = extract_fn_body(imageutil_go, "func ResizeHighQuality(")
+
+    # 断言落在**调用点**上：只查「有个叫 ResizeArea 的函数」的话，把调用换回
+    # 双线性插值、把函数留成没人用的死代码，守卫照样全绿（本项目踩过这种坑）。
+    check(
+        "缩小时走精确面积平均，而不是「折半近似 + 插值」",
+        "ResizeArea(square, dstW, dstH)" in hq_body,
+        "双线性每个输出像素只采样 4 个点，缩 32 倍时 99.6% 的源像素根本没被读到",
+    )
+    # 面积平均是低通滤波，边缘一定会被摊平，缩得越狠摊得越平 ——
+    # 这道锐化就是「别压缩太狠」的落点。反向验证时把这一行换成 `return out`：
+    # 静态断言与行为断言会同时 FAIL，缺了它这条修复就只是换了个近似算法。
+    check(
+        "缩到 2× 以上会补一道锐化（否则边缘会被平均摊平）",
+        "sharpenPremultiplied(out, sharpenAmount)" in hq_body
+        and re.search(r"sw\s*>=\s*dstW\s*\*\s*sharpenMinRatio", hq_body) is not None,
+        "缩得越狠边缘越平，用户看到的正是「图标不清楚」",
+    )
+    # 按覆盖面积加权才叫「面积平均」。只算一个方向的重叠、或者干脆等权，
+    # 都能跑、都能出图，只是缩小时会丢一多半像素。
+    area_body = extract_fn_body(imageutil_go, "func ResizeArea(")
+    check(
+        "面积平均真的按覆盖面积加权（横竖两个方向都要算重叠）",
+        "cx := math.Min(right, float64(sx+1)) - math.Max(left, float64(sx))" in area_body
+        and "cy := math.Min(bottom, float64(sy+1)) - math.Max(top, float64(sy))" in area_body
+        and "w := cx * cy" in area_body,
+        "等权平均就退化成「取一个代表点」，细线条还是会断",
+    )
+    # 颜色运算必须在预乘 alpha 空间：全透明像素的 RGB 没有任何意义，
+    # 不预乘就等于让这些「不存在的颜色」按同样的权重参与平均与锐化 ——
+    # 表现出来是图标外圈糊出一圈脏描边、边缘泛彩色噪点。
+    bilinear_body = extract_fn_body(imageutil_go, "func ResizeBilinear(")
+    check(
+        "颜色运算在预乘 alpha 空间做（放大与锐化都要）",
+        bilinear_body.count("premultiplied(srcRGBA.RGBAAt(") == 4
+        and "float64(c.R) * a / 255" in extract_fn_body(imageutil_go, "func premultiplied("),
+        "全透明像素的颜色参与平均，会给图标外圈套上一圈脏描边",
+    )
+    check(
+        "缩放只有一份实现（旧的「反复折半」近似不许以第二条路径回来）",
+        "func BoxDownscale(" not in imageutil_go,
+        "两套缩放并存时产物走哪一条取决于调用点 —— 改了 A 看起来「没生效」",
+    )
+    # 运行时生成的默认图标（favicon、面板品牌图）走的是另一条调用链，
+    # 必须与产品图标汇到同一个入口，否则会出现「应用中心图标清楚了、
+    # 桌面上的还是糊的」。
+    check(
+        "运行时默认图标与产品图标走同一条重采样路径",
+        "ResizeHighQuality(logo, size, size)" in extract_fn_body(icon_go, "func DefaultIcon("),
+        "两条路径各写一份的话，改了其中一条只有一半的图标会变",
+    )
+    # 「改了 logo 只重新生成一部分」不会有任何报错，只表现为有的地方图标换了、
+    # 有的没换 —— 浏览器标签与面板里的品牌图标走的正是内嵌那张，最容易漏。
+    # 字节级的比对只能由测试来做，所以这里守的是"那条测试还在、且产物清单齐全"。
+    iconforge_go = read_text(os.path.join(repo_root, "cmd", "iconforge", "main.go"))
+    artifacts_test = os.path.join(repo_root, "internal", "fnos", "icon_assets_test.go")
+    check(
+        "logo 的 5 个派生产物由同一处生成，且有测试钉住它们彼此一致",
+        iconforge_go.count("set.Small") == 2
+        and iconforge_go.count("set.Large") == 3
+        and "TestShippedIconArtifactsStayInSync" in read_text(artifacts_test),
+        "少重新生成任何一处都不会报错，只表现为「桌面图标换了、页面里没换」",
+    )
+
+    # ---- 服务发现：同一个服务的多个套接字必须收成一行 -------------------------
+    #
+    # 用户的原话是「为什么扫描出来的端口是重复的，有 0.0.0.0 的有不带的，
+    # 然后窗口最大化之后又再重复出来了很多」。
+    #
+    # 追下来病根有两层，而且都不在"扫描"上：
+    #   1. 内核按**套接字**记账（IPv4/IPv6 通配各一份、tcp/udp 各一份，
+    #      nmbd 这类还在每个网卡地址上各绑一份），而界面按**服务**展示；
+    #   2. 界面把协议当成"第二行为空时的兜底"来显示 —— 于是同地址同端口的
+    #      一对 tcp/udp 套接字渲染成了两条**一模一样**的行。
+    # 所以这组守卫盯两件事：后端真的合并了，前端真的把协议画出来了。
+    group_go = read_text(os.path.join(repo_root, "internal", "discovery", "group.go"))
+    scanner_go = read_text(os.path.join(repo_root, "internal", "discovery", "scanner.go"))
+    port_types_go = read_text(os.path.join(repo_root, "internal", "discovery", "types.go"))
+    ports_api_go = read_text(os.path.join(repo_root, "internal", "httpapi", "discovery.go"))
+    discovery_js = read_text(os.path.join(web_root, "modules", "views", "discovery.js"))
+
+    # 断言必须落在**调用点**上。只检查 "func GroupPorts(" 存在的话，
+    # 把调用摘掉、把函数留成没人用的死代码，守卫照样全绿。
+    listening_body = extract_fn_body(scanner_go, "func (s *Scanner) Listening(")
+    check(
+        "扫描结果在出口前会把同一服务的多个套接字合并成一行",
+        "out = GroupPorts(out)" in listening_body,
+        "不合并的话，同一个 sshd 只因为 IPv4/IPv6 各绑一份就显示成两条",
+    )
+    check(
+        "合并排在容器关联之后（容器是按端口+协议索引的，合并后就只剩一个主协议）",
+        listening_body.find("Enrich(") >= 0
+        and listening_body.find("Enrich(") < listening_body.find("GroupPorts("),
+        "先合并再关联容器，udp 那一半就再也匹配不上容器信息了",
+    )
+    # 「同一个服务」的身份只能是进程 + 端口。把协议或地址算进身份，
+    # 同一服务的 tcp/udp 就永远合不到一起 —— 那正是用户看到的重复。
+    key_body = extract_fn_body(group_go, "func groupKey(")
+    check(
+        "同一服务的身份是「进程 + 端口」，协议与地址都不算身份",
+        bool(key_body) and "Protos" not in key_body and "Address" not in key_body
+        and "p.Port" in key_body,
+        "把协议算进身份，同地址同端口的一对 tcp/udp 就永远合不到一起",
+    )
+    # 「所有网卡 / 仅本机」是一个**判断**，必须只写一处。前端若自己去比
+    # 字符串 "0.0.0.0"，两侧判据迟早不一致；而且 :: 在界面上会被当成"没有地址"。
+    #
+    # 引号形态两种都要拦：第一版只找双引号，而反向验证时用的补丁写的是
+    # `=== '0.0.0.0'`（单引号）—— 守卫照样全绿，这条补丁白跑了。
+    # 断言落成"文件里不许出现这两个地址的字面量"，与人家用什么引号无关。
+    check(
+        "「所有网卡 / 仅本机」的判断只在 Go 侧做一次（前端不许自己比字符串）",
+        "func IsWildcardAddress(" in group_go
+        and "IsWildcardAddress(a)" in extract_fn_body(group_go, "func ClassifyScope(")
+        and re.search(r"""["'](?:0\.0\.0\.0|::)["']""", discovery_js) is None,
+        "前后端各写一份判据，界面上那两种说法迟早对不上",
+    )
+    check(
+        "合并结果把完整绑定地址与协议集合一起带出去",
+        'json:"addresses,omitempty"' in port_types_go
+        and 'json:"protos,omitempty"' in port_types_go
+        and 'json:"scope,omitempty"' in port_types_go,
+        "只给一个代表地址的话，界面永远说不出「这个服务对谁可见」——"
+        "而 nmbd 那种绑了十一个网卡地址的服务，挑哪一个当代表都是误导",
+    )
+    # 协议必须**永远**显示出来。早先它只是第二行为空时的兜底，于是同地址同
+    # 端口的一对 tcp/udp 渲染成一模一样的行。反向验证时把 `text: protoLabel(p)`
+    # 换成 `text: ''`：类名还在、节点还在，只搜类名的守卫照样全绿 ——
+    # 所以断言落在"真的把值传进去了"这一步。
+    check(
+        "协议被真的画进了端口号那一格（不是建了个空标签）",
+        "h('span', { class: 'port-proto', text: protoLabel(p) })" in discovery_js,
+        "同地址同端口的一对 tcp/udp 除了协议之外没有任何区别，协议藏起来就是"
+        "「两条一模一样的行」；放在第二行末尾还会被 truncate 砍掉",
+    )
+    # 匹配落在**声明块**上，不能只搜类名：整条规则删掉、只留个 :empty 选择器，
+    # `.port-proto` in style_code 依然为真。
+    check(
+        "协议标签有自己的样式，且为空时不占位",
+        re.search(r"\.port-proto\s*\{[^}]*font-size:", style_code) is not None
+        and re.search(r"\.port-proto:empty\s*\{[^}]*display:\s*none", style_code) is not None,
+        "缺样式会把每一行撑开；空标签不收起则每行下面多出一条空白",
+    )
+    # 断言落在"返回值真的被用了"上：`ports, _ := ...Listening(...)` 时
+    # 套接字数会被直接丢掉，而方法名、字段名都还在。
+    check(
+        "服务数与合并前的套接字一起报出来（少了一大截要能解释）",
+        "Sockets int" in ports_api_go
+        and re.search(r"ports,\s*sockets\s*:=\s*s\.deps\.Scanner\.Listening\(", ports_api_go) is not None
+        and re.search(r"Sockets:\s*sockets", ports_api_go) is not None
+        and "state.discovery.sockets" in discovery_js,
+        "101 个套接字显示成二十来个服务，不说清楚会被当成「漏了一堆端口」",
+    )
+    # 「两行长得一模一样」是视觉事实，静态断言守不住 —— 得有人在真视口里
+    # 把每一行的"身份"算出来去重。而且"改视口后重复变多"更是只有改视口
+    # 再数一遍才能证伪。光有文件名常量不算接上：必须真的被当成参数传给 node。
+    check(
+        "端口行有没有重复由真浏览器回归守着（静态断言只能查到有没有标签）",
+        os.path.isfile(os.path.join(repo_root, "scripts", "browser-discovery-check.js"))
+        and "[node, DISCOVERY_SCRIPT, url]" in read_text(os.path.join(repo_root, "scripts", "browser-e2e.py")),
+        "「协议藏起来了」和「协议显示了」在静态文本里都能找到类名，"
+        "只有渲染出来才能判断两行是不是真的一样",
     )
 
     # ---- 打包脚本：两个「名字撞车 / 顺序」陷阱 --------------------------------

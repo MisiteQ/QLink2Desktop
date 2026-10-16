@@ -36,6 +36,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NODE_SCRIPT = os.path.join(ROOT, "scripts", "browser-boot-check.js")
 MOBILE_SCRIPT = os.path.join(ROOT, "scripts", "browser-mobile-check.js")
 ICON_SCRIPT = os.path.join(ROOT, "scripts", "browser-icon-check.js")
+DISCOVERY_SCRIPT = os.path.join(ROOT, "scripts", "browser-discovery-check.js")
 E2E_SCRIPT = os.path.join(ROOT, "scripts", "e2e-gateway-check.py")
 
 # 看门狗在 12 秒触发，浏览器侧等 15 秒留出余量。
@@ -97,7 +98,18 @@ def main() -> int:
         default="ok",
         help="ok=应正常进入应用；diagnostic=应把失败证据显示在启动页上",
     )
+    # 各段可以单独跑。
+    #
+    # 加这个开关是为了**反向验证**：要确认某条断言不是空过，就得把对应的事实
+    # 改坏再跑一遍。只跑相关的那一段能让每轮从几分钟降到几十秒 ——
+    # 而"反向验证太慢"的结果一定是"有人省掉它"，这个项目已经为此吃过亏。
+    parser.add_argument(
+        "--sections",
+        default="nav,icon,discovery",
+        help="要跑的段，逗号分隔：nav（导航）/ icon（自动图标）/ discovery（服务发现）",
+    )
     args = parser.parse_args()
+    sections = {s.strip() for s in args.sections.split(",") if s.strip()}
 
     exe = os.path.abspath(args.exe)
     if not os.path.isfile(exe):
@@ -228,51 +240,80 @@ def main() -> int:
             # 排除某个 class 的规则（`span:not(...)`）整体消失（图标本身也是 span），
             # 七个功能项变成看不见、点不准的空白按钮。这一段在整个链路里
             # 原本查不出来：图标一直在 DOM 里，"元素存在"的断言看不见它。
-            print()
-            print(f"{BOLD}窄屏 / 宽屏导航可用性{RESET}")
-            mobile = subprocess.run(
-                [node, MOBILE_SCRIPT, url],
-                capture_output=True,
-                text=True,
-                env=node_env(),
-                timeout=240,
-            )
-            print(mobile.stdout.rstrip())
-            if mobile.stderr.strip():
-                print(mobile.stderr.rstrip(), file=sys.stderr)
-            tail = [ln for ln in mobile.stdout.splitlines() if "通过" in ln and "失败" in ln]
-            if not check(
-                mobile.returncode == 0,
-                "窄屏与宽屏下的导航都可用（逐条见上）",
-                tail[-1] if tail else "移动端验证脚本没有输出汇总行",
-            ):
-                failures += 1
-            print()
+            if "nav" in sections:
+                print()
+                print(f"{BOLD}窄屏 / 宽屏导航可用性{RESET}")
+                mobile = subprocess.run(
+                    [node, MOBILE_SCRIPT, url],
+                    capture_output=True,
+                    text=True,
+                    env=node_env(),
+                    timeout=240,
+                )
+                print(mobile.stdout.rstrip())
+                if mobile.stderr.strip():
+                    print(mobile.stderr.rstrip(), file=sys.stderr)
+                tail = [ln for ln in mobile.stdout.splitlines() if "通过" in ln and "失败" in ln]
+                if not check(
+                    mobile.returncode == 0,
+                    "窄屏与宽屏下的导航都可用（逐条见上）",
+                    tail[-1] if tail else "移动端验证脚本没有输出汇总行",
+                ):
+                    failures += 1
+                print()
 
             # ---- 第三段：「自动」图标那一档有没有反应 -----------------------
             # 用户报了两次：「这个过程有个什么提示吗或者能让人知道搜索中或者
             # 搜索状态」「不光是快捷方式，本机端口和端口映射也有这样的问题」。
             # 这一档原先永远是内置默认图 + 一个字都没有，用户无从判断
             # 到底找没找过。这一段专门验"过程可见"。
-            print(f"{BOLD}「自动」图标：查找过程是否可见{RESET}")
-            icon = subprocess.run(
-                [node, ICON_SCRIPT, url],
-                capture_output=True,
-                text=True,
-                env=node_env(),
-                timeout=180,
-            )
-            print(icon.stdout.rstrip())
-            if icon.stderr.strip():
-                print(icon.stderr.rstrip(), file=sys.stderr)
-            tail = [ln for ln in icon.stdout.splitlines() if "通过" in ln and "失败" in ln]
-            if not check(
-                icon.returncode == 0,
-                "「自动」图标档显示了查找中 / 结果（逐条见上）",
-                tail[-1] if tail else "图标验证脚本没有输出汇总行",
-            ):
-                failures += 1
-            print()
+            if "icon" in sections:
+                print(f"{BOLD}「自动」图标：查找过程是否可见{RESET}")
+                icon = subprocess.run(
+                    [node, ICON_SCRIPT, url],
+                    capture_output=True,
+                    text=True,
+                    env=node_env(),
+                    timeout=180,
+                )
+                print(icon.stdout.rstrip())
+                if icon.stderr.strip():
+                    print(icon.stderr.rstrip(), file=sys.stderr)
+                tail = [ln for ln in icon.stdout.splitlines() if "通过" in ln and "失败" in ln]
+                if not check(
+                    icon.returncode == 0,
+                    "「自动」图标档显示了查找中 / 结果（逐条见上）",
+                    tail[-1] if tail else "图标验证脚本没有输出汇总行",
+                ):
+                    failures += 1
+                print()
+
+            # ---- 第四段：服务发现里的端口行还会不会重复 ---------------------
+            # 用户报了「为什么扫描出来的端口是重复的，有 0.0.0.0 的有不带的，
+            # 然后窗口最大化之后又再重复出来了很多」。
+            # 前半句是"同一服务的多个套接字被当成多个端口"，后半句是"改视口后
+            # 又冒出来更多"。两者都是**视觉事实**：静态守卫能查到代码里有协议
+            # 标签，查不到两行渲染出来是否长得一模一样、也查不到改视口后行数变没变。
+            if "discovery" in sections:
+                print(f"{BOLD}服务发现：端口行还会不会重复{RESET}")
+                disc = subprocess.run(
+                    [node, DISCOVERY_SCRIPT, url],
+                    capture_output=True,
+                    text=True,
+                    env=node_env(),
+                    timeout=180,
+                )
+                print(disc.stdout.rstrip())
+                if disc.stderr.strip():
+                    print(disc.stderr.rstrip(), file=sys.stderr)
+                tail = [ln for ln in disc.stdout.splitlines() if "通过" in ln and "失败" in ln]
+                if not check(
+                    disc.returncode == 0,
+                    "端口列表没有重复行，改视口也不会多出来（逐条见上）",
+                    tail[-1] if tail else "服务发现验证脚本没有输出汇总行",
+                ):
+                    failures += 1
+                print()
         else:
             if not check(snap["bootVisible"] and not snap["shellVisible"], "停在启动页（复刻故障场景）"):
                 failures += 1

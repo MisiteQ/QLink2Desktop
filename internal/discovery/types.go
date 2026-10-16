@@ -20,7 +20,12 @@ const (
 	ProtoUDP Proto = "udp"
 )
 
-// PortInfo 描述一个被监听的端口。
+// PortInfo 描述一个被监听的服务。
+//
+// 注意这里的粒度和内核表不同：内核按**套接字**记账，一个服务往往占好几个
+// （IPv4/IPv6 通配各一份、tcp/udp 各一份、每个网卡地址各一份）。
+// 出口给前端之前会先过一遍 GroupPorts，把它们收成一行 ——
+// 所以 Port / Proto / Address 是"代表值"，完整信息在 Protos / Addresses。
 type PortInfo struct {
 	Port    int    `json:"port"`
 	Proto   Proto  `json:"proto"`
@@ -28,6 +33,20 @@ type PortInfo struct {
 	Process string `json:"process,omitempty"` // 进程名
 	PID     int    `json:"pid,omitempty"`
 	User    string `json:"user,omitempty"`
+
+	// Addresses 是同一个服务绑定的全部地址，已去重并排序。
+	//
+	// 合并后仍要把完整名单带出去：用户据此才能看出"这个服务到底对谁可见"。
+	Addresses []string `json:"addresses,omitempty"`
+	// Protos 是同一个服务监听的协议集合，顺序固定 tcp → udp。
+	//
+	// 它必须单独存在、并且必须被界面显示出来：早先协议只在第二行为空时
+	// 才当兜底显示，于是同地址同端口的一对 tcp / udp 套接字渲染成了两条
+	// 一模一样的行，用户看到的就是"扫描出来的端口是重复的"。
+	Protos []Proto `json:"protos,omitempty"`
+	// Scope 说明这些地址的可见范围（所有网卡 / 仅本机 / 指定网卡）。
+	// 判断在 GroupPorts 里做一次，前端只负责翻译成人话。
+	Scope AddressScope `json:"scope,omitempty"`
 
 	// Container 非空时表示该端口由 Docker 容器映射出来。
 	Container *ContainerInfo `json:"container,omitempty"`

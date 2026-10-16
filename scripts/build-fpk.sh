@@ -64,14 +64,14 @@ VERSION_FILE="${ROOT_DIR}/VERSION"
 if [ -z "${VERSION:-}" ]; then
     if [ ! -f "${VERSION_FILE}" ]; then
         echo "!! 缺少版本文件 ${VERSION_FILE}" >&2
-        echo "   请写入形如 1.2.6 的版本号，或用 VERSION=x.y.z 显式指定。" >&2
+        echo "   请写入形如 1.2.7 的版本号，或用 VERSION=x.y.z 显式指定。" >&2
         exit 1
     fi
     VERSION="$(tr -d '[:space:]' < "${VERSION_FILE}")"
 fi
 VERSION="${VERSION#v}"
 if ! printf '%s' "${VERSION}" | grep -Eq '^[0-9]+(\.[0-9]+)*$'; then
-    echo "!! 版本号格式非法: ${VERSION}（应形如 1.2.6）" >&2
+    echo "!! 版本号格式非法: ${VERSION}（应形如 1.2.7）" >&2
     exit 1
 fi
 

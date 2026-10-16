@@ -39,7 +39,7 @@ export const state = {
   logPaused: false,
 
   /** 发现结果 */
-  discovery: { ports: [], docker: false, loading: false, at: 0 },
+  discovery: { ports: [], sockets: 0, docker: false, loading: false, at: 0 },
   dockLabels: [],
   hosts: [],
   icons: [],

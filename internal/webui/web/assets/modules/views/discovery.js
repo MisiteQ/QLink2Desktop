@@ -125,7 +125,7 @@ function portsBody() {
   const managed = ports.filter((p) => p.managed).length;
 
   append(box, h('div', { class: 'grid cols-4 mb-3' }, [
-    statCard('activity', '监听端口', String(ports.length)),
+    statCard('activity', '监听服务', String(ports.length), socketHint()),
     statCard('check', '已放到桌面', String(managed)),
     statCard('box', '来自容器', String(containerPorts.length + labels.length)),
     statCard('zap', '扫描耗时', state.discovery.at ? `${state.discovery.elapsed || 0} ms` : '—'),
@@ -138,16 +138,31 @@ function portsBody() {
       h('div', { class: 'card-head' }, [
         h('div', {}, [
           h('h2', { text: '其它服务' }),
-          h('p', { text: '没有容器信息的本机监听端口；点击「放到桌面」即可生成一个飞牛桌面图标' }),
+          h('p', { text: '没有容器信息的本机监听服务；点击「放到桌面」即可生成一个飞牛桌面图标' }),
         ]),
       ]),
       h('div', { class: 'card-body' }, [
+        // 用户报过「扫描出来的端口是重复的」：一个服务在内核表里往往是好几个
+        // 套接字（IPv4/IPv6 通配各一份、tcp/udp 各一份、每个网卡地址各一份）。
+        // 现在收成一行，但必须把"收过"这件事说出来，否则看起来像丢了很多端口。
+        h('p', { class: 'muted', style: { margin: '0 0 10px', fontSize: '.78rem' }, text:
+          '同一个服务的多个绑定地址与协议已合并为一条；悬停任意一项可看到完整绑定地址。' }),
         h('div', { class: 'port-grid' }, otherPorts.map(portItem)),
       ]),
     ]));
   }
 
   return box;
+}
+
+// socketHint 是「监听服务」那张卡的悬停说明。
+//
+// 内核按套接字记账、界面按服务展示，两者天生差着一个数量级 ——
+// 不把这个差说出来，用户会把合并读成"漏了一堆端口"。
+function socketHint() {
+  const sockets = state.discovery.sockets || 0;
+  if (!sockets) return '';
+  return `合并前共 ${sockets} 个内核套接字（IPv4/IPv6 通配、tcp/udp、多网卡绑定会分开记账）`;
 }
 
 /* --------------------------------------------------- 来自容器（含一键启用） */
@@ -217,17 +232,21 @@ function dockLabelTable(list) {
 
 function portItem(p) {
   const name = p.container?.name || p.process || '未知服务';
-  const sub = [
-    p.container?.image ? p.container.image : null,
-    p.address || null,
-    p.user || null,
-  ].filter(Boolean).join(' · ');
+  // 第二行先放地址范围，再放容器镜像 —— 顺序是有意的：镜像名很长，
+  // 截断时被砍掉的应该是它，而不是"这个服务对谁可见"。
+  const sub = [addressLabel(p), p.container?.image || null].filter(Boolean).join(' · ');
 
-  return h('div', { class: 'port-item' }, [
-    h('div', { class: 'port-num', text: `:${p.port}` }),
+  return h('div', { class: 'port-item', title: portDetail(p) }, [
+    h('div', { class: 'port-num' }, [
+      h('span', { text: `:${p.port}` }),
+      // 协议必须**永远**显示出来，不能只在第二行为空时当兜底。
+      // 早先的写法里，同地址同端口的 tcp 与 udp 是两个套接字、却渲染成两条
+      // 一模一样的行 —— 用户看到的就是「扫描出来的端口是重复的」。
+      h('span', { class: 'port-proto', text: protoLabel(p) }),
+    ]),
     h('div', { class: 'meta' }, [
       h('div', { class: 'line1 truncate', title: name, text: name }),
-      h('div', { class: 'line2 truncate', title: sub, text: sub || p.proto.toUpperCase() }),
+      h('div', { class: 'line2 truncate', title: portDetail(p), text: sub || protoLabel(p) }),
     ]),
     p.managed
       ? h('span', { class: 'tag ok nowrap' }, [icon('check', 12), '已在桌面'])
@@ -236,6 +255,36 @@ function portItem(p) {
           onclick: () => addPort(p),
         }, ['放到桌面']),
   ]);
+}
+
+// protoLabel 把协议集合拼成一个短标签（tcp / udp → TCP+UDP）。
+function protoLabel(p) {
+  const list = p.protos?.length ? p.protos : (p.proto ? [p.proto] : []);
+  return list.map((x) => String(x).toUpperCase()).join('+');
+}
+
+// addressLabel 把绑定地址归纳成一句人话。
+//
+// 不逐条罗列：nmbd 那种绑了十一个网卡地址的服务，罗列出来只是把 11 条重复行
+// 换成 1 条 11 行的长文本。判断（scope）在 Go 侧做，这里只负责翻译。
+function addressLabel(p) {
+  if (p.scope === 'all') return '全网卡可见';
+  if (p.scope === 'local') return '仅本机';
+  const list = p.addresses || (p.address ? [p.address] : []);
+  if (!list.length) return '';
+  return list.length === 1 ? list[0] : `${list.length} 个网卡地址`;
+}
+
+// portDetail 是悬停提示：把被归纳掉的东西原样还给愿意深究的用户。
+function portDetail(p) {
+  const list = p.addresses || (p.address ? [p.address] : []);
+  return [
+    p.process || null,
+    p.container?.image || null,
+    list.length ? `绑定 ${list.join('、')}` : null,
+    p.pid ? `PID ${p.pid}` : null,
+    p.user ? `用户 ${p.user}` : null,
+  ].filter(Boolean).join(' · ');
 }
 
 async function addPort(p) {
@@ -253,8 +302,8 @@ async function addPort(p) {
   if (result) scanLocal(false);
 }
 
-function statCard(iconName, label, value) {
-  return h('div', { class: 'stat' }, [
+function statCard(iconName, label, value, hint) {
+  return h('div', { class: 'stat', title: hint || '' }, [
     h('div', { class: 'stat-label' }, [icon(iconName, 13), label]),
     h('div', { class: 'stat-value', text: value }),
   ]);
@@ -269,13 +318,16 @@ async function scanLocal(force) {
     patch({
       discovery: {
         ports: res.items || [],
+        // 合并前的套接字数要一起留住：它只在扫描响应里出现一次，
+        // 而界面在扫描之后还会被重绘很多次（切页签、改窗口大小）。
+        sockets: res.sockets || 0,
         docker: !!res.docker,
         loading: false,
         at: Date.now(),
         elapsed: res.elapsed_ms || (Date.now() - started),
       },
     });
-    if (force) notify.ok(`扫描完成，发现 ${(res.items || []).length} 个监听端口`);
+    if (force) notify.ok(`扫描完成，发现 ${(res.items || []).length} 个监听服务`);
   } catch (err) {
     patch({ discovery: { ...state.discovery, loading: false } });
     if (err.status !== 401) notify.error(`扫描失败：${err.message}`);

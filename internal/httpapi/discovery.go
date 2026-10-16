@@ -50,6 +50,12 @@ func (s *Server) handlePickPort(w http.ResponseWriter, r *http.Request) {
 type portListResponse struct {
 	Items []discovery.PortInfo `json:"items"`
 	Total int                  `json:"total"`
+	// Sockets 是**合并前**的套接字数量。
+	//
+	// 内核按套接字记账、界面按服务展示，两者天生差着一个数量级。不把这个差
+	// 说出来，用户会以为合并是"漏了一堆端口"（101 → 二十来个，第一反应一定是
+	// 少了东西）。前端把它作为统计卡的提示文字显示。
+	Sockets int `json:"sockets,omitempty"`
 	// Docker 表示容器运行时是否可用（不可用时前端应隐藏"容器"筛选）。
 	Docker bool `json:"docker"`
 	// ElapsedMs 是本次采集 / 扫描耗时，便于用户判断是否需要缩小范围。
@@ -63,12 +69,13 @@ func (s *Server) handleLocalPorts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start := time.Now()
-	ports := s.deps.Scanner.Listening(queryBool(r, "force"))
+	ports, sockets := s.deps.Scanner.Listening(queryBool(r, "force"))
 	s.markManaged(ports)
 
 	ok(w, portListResponse{
 		Items:     ports,
 		Total:     len(ports),
+		Sockets:   sockets,
 		Docker:    s.dockerAvailable(),
 		ElapsedMs: time.Since(start).Milliseconds(),
 	})
