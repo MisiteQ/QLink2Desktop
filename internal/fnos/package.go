@@ -77,10 +77,12 @@ const (
 //     浏览器拼出来的是 hostname + 子路径（没有端口），
 //     用户再到 fnOS 应用设置里填反代域名 / 子域名反代即可。
 //
-//  3. Port > 0（WANModeRelay）    → routeDirect
+//  3. Port > 0（WANModeRelay / WANModeIntranet） → routeDirect
 //     保留既有形态：入口声明 protocol + port + url。
 //     浏览器拼 protocol://hostname:port/url，
 //     内网直连本机 IP，外网经 FN Connect 时由中继给三级子域名。
+//     两者路由形态相同，区别仅在「是否遵守 all_users」：中继模式强制全员可见
+//     （否则外网被网关拒绝），仅内网模式遵守用户设置（放弃外网中继）。
 //
 //  4. 无端口（快捷方式等）        → routeRedirect
 //     没什么可走，只能 CGI 302 兜底。
@@ -319,9 +321,12 @@ func BuildUIEntry(spec PackageSpec) uiEntry {
 
 		// 飞牛 Connect 的外网子域名网关按 Cookie 域隔离来鉴权；
 		// 若桌面入口声明为「仅管理员可见」，外网访问会被网关直接拒绝并报
-		// "FN Connect 暂无权限访问该服务"。因此凡是走端口的入口一律放开为全员可见。
-		// 这是原项目踩过的坑，保留同样的处理并在此显式记录原因。
-		entry.AllUsers = true
+		// "FN Connect 暂无权限访问该服务"。因此中继模式（默认）一律放开为全员可见。
+		// 仅内网模式（WANModeIntranet）下用户显式放弃了外网中继，此时遵守用户的
+		// all_users 设置，让「仅管理员可见」在内网真正生效。
+		if spec.WANMode != domain.WANModeIntranet {
+			entry.AllUsers = true
+		}
 
 	case routeFnosProxy:
 		// fnOS 内置反代形态：入口不声明 port、protocol 留空让 fnOS 自适应，

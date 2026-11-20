@@ -155,6 +155,15 @@ func TestLinkNormalizeWANMode(t *testing.T) {
 		t.Error("公网反代模式且填了地址时应启用分流")
 	}
 
+	l.WANMode = WANModeIntranet
+	l.Normalize()
+	if l.WANMode != WANModeIntranet {
+		t.Errorf("仅内网模式应被 Normalize 保留，实际 %q", l.WANMode)
+	}
+	if l.WantsPublicWAN() {
+		t.Error("仅内网模式不应启用公网反代分流")
+	}
+
 	shortcut := Link{Name: "S", Kind: KindShortcut, Path: "https://a.b",
 		WANMode: WANModePublic, PublicURL: "https://ha.example.com"}
 	shortcut.Normalize()

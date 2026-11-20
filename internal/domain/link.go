@@ -45,12 +45,16 @@ const (
 	WANModeFnosProxy WANMode = "fn_proxy"
 	// WANModePublic 外网优先使用用户填写的公网反代地址。
 	WANModePublic WANMode = "public"
+	// WANModeIntranet 仅内网：入口仍声明端口（与中继形态一致），但显式放弃
+	// 外网 FN Connect 中继。换来的好处是可以遵守 all_users 设置，让「仅管理员
+	// 可见」在内网真正生效；代价是外网经 FN Connect 将打不开该图标。
+	WANModeIntranet WANMode = "intranet"
 )
 
 // Normalize 把空值与未知值收敛为默认的中继模式。
 func (m WANMode) Normalize() WANMode {
 	switch m {
-	case WANModeFnosProxy, WANModePublic:
+	case WANModeFnosProxy, WANModePublic, WANModeIntranet:
 		return m
 	}
 	return WANModeRelay

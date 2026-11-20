@@ -61,6 +61,9 @@ export function openLinkEditor(existing = null, preset = {}) {
       // 形态那一堆字段在图标卡片之前就建好了，只能靠这个可变引用回填 ——
       // 图标卡建好之前用户不可能去敲地址，所以默认空实现是安全的。
       let onTargetChange = () => {};
+      // 「可见范围」要随外网模式联动（中继模式下被强制全员可见），
+      // 与 onTargetChange 同样用可变引用回填：外网卡片先于展示卡片构建。
+      let syncVisibility = () => {};
 
       /* ---------------------------------------------------- 基本信息 */
       const nameInput = h('input', {
@@ -195,7 +198,7 @@ export function openLinkEditor(existing = null, preset = {}) {
           ]));
         }
 
-        /* 外网访问：三段式 —— 飞牛 Connect / fnOS 反代 / 自定义公网反代。 */
+        /* 外网访问：四段式 —— 飞牛 Connect / 仅内网 / fnOS 反代 / 自定义公网反代。 */
         const wanHint = h('span', { class: 'hint' });
         const publicInput = h('input', {
           type: 'text', value: model.public_url,
@@ -213,6 +216,11 @@ export function openLinkEditor(existing = null, preset = {}) {
               wanHint.textContent =
                 '外网打开图标时直接跳到这里（绕过飞牛中继）；内网继续走 fnOS 反代路径。';
               break;
+            case 'intranet':
+              wanHint.textContent =
+                '入口仍声明协议 + 端口，仅内网可访问；放弃外网 FN Connect 中继，' +
+                '以换取「可见范围」里的「仅管理员可见」真正生效。';
+              break;
             default:
               wanHint.textContent =
                 '保留既有形态：入口声明 protocol + port + url，由飞牛 Connect 中继或 fnOS 子域名反代处理。';
@@ -220,9 +228,10 @@ export function openLinkEditor(existing = null, preset = {}) {
         };
         const wanSeg = segmented([
           { value: 'relay', label: '飞牛 ID' },
+          { value: 'intranet', label: '仅内网' },
           { value: 'fn_proxy', label: 'fnOS 反代' },
           { value: 'public', label: '自定义公网' },
-        ], model.wan_mode, (v) => { model.wan_mode = v; syncWan(); });
+        ], model.wan_mode, (v) => { model.wan_mode = v; syncWan(); syncVisibility(); });
         syncWan();
         append(kindBox, h('div', { class: 'card mt-3' }, [
           h('div', { class: 'card-head' }, [h('h2', { text: '外网访问' })]),
@@ -237,6 +246,7 @@ export function openLinkEditor(existing = null, preset = {}) {
             ]),
             h('ul', { class: 'muted mt-2', style: { fontSize: '.78rem', paddingLeft: '1rem', lineHeight: 1.6 } }, [
               h('li', { text: '飞牛 ID：原样沿用，入口声明协议 + 端口。内网直连、外网经 FN Connect 中继。' }),
+              h('li', { text: '仅内网：入口同样声明端口，但只在内网可用；关闭外网中继，让「仅管理员可见」生效。' }),
               h('li', { text: 'fnOS 反代：入口不声明端口，让 fnOS Nginx 按子应用名反代。到 fnOS 应用设置里填反代域名后直接生效。' }),
               h('li', { text: '自定义公网：外网优先跳到你自己配的反代域名（如 https://ha.example.com），内网不受影响。' }),
             ]),
@@ -290,15 +300,45 @@ export function openLinkEditor(existing = null, preset = {}) {
               { value: 'iframe', label: '飞牛内弹窗' },
               { value: 'url', label: '新标签页' },
             ], model.ui, (v) => { model.ui = v; })),
-            field('可见范围', h('div', { class: 'row' }, [
-              h('label', { class: 'check' }, [
-                checkbox(model.all_users, (v) => { model.all_users = v; }),
-                h('span', { class: 'check-body' }, [
-                  h('span', { text: '所有用户可见' }),
-                  h('span', { class: 'hint', text: '关闭则仅管理员可见（外网访问可能受限）' }),
+            (() => {
+              const visCheck = checkbox(model.all_users, (v) => { model.all_users = v; });
+              const visHint = h('span', { class: 'hint' });
+              const visWarn = h('span', { class: 'hint', style: { color: 'var(--warn)' } });
+              const visField = field('可见范围', h('div', {
+                style: { display: 'flex', flexDirection: 'column', gap: '6px' },
+              }, [
+                h('label', { class: 'check' }, [
+                  visCheck,
+                  h('span', { class: 'check-body' }, [
+                    h('span', { text: '所有用户可见' }),
+                    visHint,
+                  ]),
                 ]),
-              ]),
-            ])),
+                visWarn,
+              ]));
+              // 中继（端口直连）模式下，后端 BuildUIEntry 会把 allUsers 强制为 true：
+              // 界面必须如实反映——禁用开关、固定勾选，并说明原因与替代方案，
+              // 避免用户以为「取消勾选」已生效（Issue #1）。
+              // 仅内网 / fnOS 反代 / 自定义公网模式下，开关自由，遵守用户设置。
+              syncVisibility = () => {
+                const forced = model.kind !== 'shortcut' && model.wan_mode === 'relay';
+                visCheck.disabled = forced;
+                if (forced) {
+                  model.all_users = true;
+                  visCheck.checked = true;
+                  visHint.textContent =
+                    '飞牛 ID 模式下外网经 FN Connect 中继，仅管理员可见会被网关拒绝，故强制全员可见。';
+                  visWarn.textContent =
+                    '需要仅管理员可见：把上方「访问方式」改为「仅内网」或「fnOS 反代」。';
+                } else {
+                  visCheck.checked = model.all_users;
+                  visHint.textContent = '关闭则仅管理员可见';
+                  visWarn.textContent = '';
+                }
+              };
+              syncVisibility();
+              return visField;
+            })(),
           ]),
           h('div', { class: 'row mt-3' }, [
             switchBox(model.enabled, (v) => { model.enabled = v; }, { title: '启用后立即注册到飞牛桌面' }),
@@ -423,7 +463,7 @@ function toPayload(model) {
     host: model.kind === 'local' ? 'localhost' : model.host.trim(),
     port: model.kind === 'shortcut' ? 0 : Number(model.port) || 0,
     path: path || '/',
-    wan_mode: model.kind === 'shortcut' ? '' : (model.wan_mode === 'fn_proxy' ? 'fn_proxy' : (model.wan_mode === 'public' ? 'public' : 'relay')),
+    wan_mode: model.kind === 'shortcut' ? '' : model.wan_mode,
     public_url: model.kind === 'shortcut' ? '' : model.public_url.trim(),
     ui: model.ui,
     all_users: model.all_users,

@@ -505,6 +505,7 @@ func TestDecideRoute(t *testing.T) {
 		want routeMode
 	}{
 		{"有端口即直连", PackageSpec{Port: 8080}, routeDirect},
+		{"仅内网模式有端口仍走直连", PackageSpec{Port: 8080, WANMode: domain.WANModeIntranet}, routeDirect},
 		{"有端口时目标地址不影响判定", PackageSpec{Port: 8080, ShortcutURL: "https://a.b/c"}, routeDirect},
 		{"无端口即 CGI 跳转", PackageSpec{}, routeRedirect},
 		{"无端口但有网址仍是 CGI 跳转", PackageSpec{ShortcutURL: "https://a.b/c"}, routeRedirect},

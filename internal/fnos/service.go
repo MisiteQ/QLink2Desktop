@@ -423,6 +423,13 @@ func (s *Service) buildSpec(l domain.Link, portOverride int) PackageSpec {
 		spec.Port = 0
 		// ManifestPort 保持 port 不变（让 fnOS Nginx 反代到真实端口）。
 
+	case domain.WANModeIntranet:
+		// 仅内网：入口仍声明端口（路由形态与中继一致，走 routeDirect），
+		// 但 BuildUIEntry 不会再强制 allUsers=true，用户的「仅管理员可见」生效。
+		// 代价是放弃外网 FN Connect 中继——外网经中继将打不开该图标。
+		spec.WANMode = domain.WANModeIntranet
+		// Port / ManifestPort 保持原值。
+
 	case domain.WANModePublic:
 		// 外网优先走公网反代：入口走 CGI 分流，外网 302 到用户反代域名，
 		// 内网回到本机端口。manifest 里仍然声明 service_port，

@@ -162,6 +162,40 @@ func TestBuildPackagePortMode(t *testing.T) {
 	assertTree(t, dir)
 }
 
+// TestBuildUIEntryAllUsersByWANMode 锁定「可见范围」在各外网模式下的行为
+// （Issue #1）：中继模式为保外网 FN Connect 可用而强制全员可见，
+// 仅内网模式则遵守用户的 all_users 设置。
+func TestBuildUIEntryAllUsersByWANMode(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		wanMode  domain.WANMode
+		allUsers bool
+		want     bool
+	}{
+		{"中继模式忽略用户设置、强制全员可见", domain.WANModeRelay, false, true},
+		{"未指定外网方式（等价中继）也强制全员可见", "", false, true},
+		{"仅内网模式遵守 all_users=false", domain.WANModeIntranet, false, false},
+		{"仅内网模式保留 all_users=true", domain.WANModeIntranet, true, true},
+		{"fnOS 反代模式遵守 all_users=false", domain.WANModeFnosProxy, false, false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := baseSpec("qlink2d.vis-1")
+			spec.Port = 8080
+			spec.WANMode = tc.wanMode
+			spec.AllUsers = tc.allUsers
+			entry := BuildUIEntry(spec)
+			if entry.AllUsers != tc.want {
+				t.Fatalf("AllUsers = %v，期望 %v", entry.AllUsers, tc.want)
+			}
+		})
+	}
+}
+
 // TestBuildPackageShortcutUsesCGI302 锁定「网址快捷方式 = CGI 302」这条产品约束。
 //
 // 上一版实现把入口 url 写成**绝对外链**（routeExternal），理由是"书签不该占用
